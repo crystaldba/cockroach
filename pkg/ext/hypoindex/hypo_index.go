@@ -430,8 +430,8 @@ func (h *HypoIndexExplainer) buildIndexCandidates(
 
 		// 1. First, try to get the actual schema name if catalog is available
 		if h.catalog != nil {
-			// Try to resolve the schema name from the ID
-			schemaName := getSchemaNameForID(tbl.GetParentSchemaID())
+			// Try to look up the schema name using the parent ID of the table
+			schemaName := h.resolveSchemaName(context.Background(), tbl)
 			if schemaName != "" {
 				schemaTableKey := fmt.Sprintf("%s.%s", schemaName, tbl.GetName())
 				if indexes, found := indexesByTable[schemaTableKey]; found {
@@ -487,9 +487,13 @@ func (h *HypoIndexExplainer) buildIndexCandidates(
 	return result
 }
 
-// getSchemaNameForID returns a known schema name for a schema ID
-// This is a simple helper that returns common schema names for known IDs
-func getSchemaNameForID(schemaID descpb.ID) string {
+// resolveSchemaName attempts to resolve the schema name for a table descriptor
+// It uses multiple approaches to find the schema name
+func (h *HypoIndexExplainer) resolveSchemaName(ctx context.Context, tbl catalog.TableDescriptor) string {
+	// Try to get the schema descriptor directly
+	schemaID := tbl.GetParentSchemaID()
+
+	// First check for well-known schema IDs
 	switch schemaID {
 	case 29: // Common ID for public schema
 		return "public"
@@ -497,9 +501,42 @@ func getSchemaNameForID(schemaID descpb.ID) string {
 		return catconstants.PgCatalogName
 	case 31: // Common ID for information_schema
 		return catconstants.InformationSchemaName
-	default:
-		return "" // Unknown schema ID
 	}
+
+	// If the catalog implements the SchemaResolver interface, use it directly
+	if resolver, ok := h.catalog.(interface {
+		GetSchemaDescriptor(ctx context.Context, id descpb.ID) (string, error)
+	}); ok {
+		name, err := resolver.GetSchemaDescriptor(ctx, schemaID)
+		if err == nil && name != "" {
+			return name
+		}
+	}
+
+	// Try to execute a query to get the schema name if we have an SQL executor
+	if h.sqlExecutor != nil {
+		query := fmt.Sprintf(
+			`SELECT name FROM system.namespace WHERE id = %d AND type = 'schema'`,
+			schemaID,
+		)
+
+		rows, err := h.sqlExecutor.QueryBufferedEx(
+			ctx,
+			"resolve-schema-name",
+			nil, /* txn */
+			nil, /* override */
+			query,
+		)
+
+		if err == nil && len(rows) > 0 && len(rows[0]) > 0 {
+			if name, ok := rows[0][0].(*tree.DString); ok {
+				return string(*name)
+			}
+		}
+	}
+
+	// Could not resolve the schema name through any means
+	return ""
 }
 
 // findCatTable finds the cat.Table corresponding to a catalog.TableDescriptor
