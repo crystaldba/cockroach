@@ -5,17 +5,22 @@
 
 package hypoindex
 
+import (
+	"github.com/cockroachdb/cockroach/pkg/sql"
+)
+
 // This file will be used to register the extension with CockroachDB's
 // extension system once the proper API is available.
 
 // init registers the hypoindex extension with CockroachDB.
 func init() {
-	// This is a placeholder registration that would be replaced
-	// with actual registration code once the extension system
-	// provides a proper API.
-	//
-	// Example:
-	// sql.RegisterExtension("hypoindex", CreateExtensionHook)
+	// Register our extension with CockroachDB's extension system.
+	// The actual registration happens in pkg/sql/create_extension.go
+	sql.RegisterExtension(sql.CreateExtensionDefinition{
+		Name:       "hypoindex",
+		OnCreate:   CreateExtensionHook,
+		OnActivate: ActivateExtensionHook,
+	})
 }
 
 // RegisterBuiltinFunctions registers any builtin functions provided by this
@@ -23,8 +28,5 @@ func init() {
 func RegisterBuiltinFunctions() {
 	// Register any builtin functions provided by the extension
 	// Example:
-	// sql.RegisterBuiltin(tree.FunctionDefinition{
-	//     Name:       "hypo_explain",
-	//     Definition: hypoExplainFnImpl,
-	// })
+	// sql.RegisterBuiltin("hypo_explain", hypoExplainImpl)
 }

@@ -2,6 +2,61 @@
 
 This extension provides functionality similar to PostgreSQL's `hypopg` extension, allowing users to experiment with hypothetical indexes without actually creating them in the database.
 
+## Current Status
+
+This is a minimalist implementation to demonstrate the concept. Due to the complexity of integrating with CockroachDB's internal query optimizer, this extension currently provides a simplified API.
+
+## Features
+
+The extension supports:
+
+1. Storing hypothetical index definitions
+2. Simulating EXPLAIN output with hypothetical indexes
+
+## Building and Testing
+
+### Building with Bazel
+
+```bash
+bazel build //pkg/ext/hypoindex
+```
+
+### Testing the Example
+
+```bash
+bazel run //pkg/ext/hypoindex/example
+```
+
+## Future Improvements
+
+1. Connect to the internal query optimizer
+2. Leverage the existing HypotheticalTable implementation
+3. Provide accurate explain plans that truly reflect hypothetical index performance
+
+## Architecture
+
+The extension has a simple architecture:
+
+1. **Storage Layer**: A table to store hypothetical index definitions
+2. **API Layer**: Functions to create, list, and drop hypothetical indexes
+3. **Explain Implementation**: A function to simulate query plans with hypothetical indexes
+
+## Usage Example
+
+```sql
+-- Create a hypothetical index
+SELECT pg_extension.hypo_create_index(
+  'public',        -- schema name
+  'users',         -- table name
+  'idx_users_name', -- index name
+  ARRAY['name'],   -- columns
+  ARRAY['email']   -- storing columns (optional)
+);
+
+-- Run EXPLAIN with hypothetical indexes
+SELECT pg_extension.hypo_explain('SELECT * FROM users WHERE name = ''John''');
+```
+
 ## Overview
 
 The `hypoindex` extension lets you:
