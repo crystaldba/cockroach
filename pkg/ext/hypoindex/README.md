@@ -1,136 +1,88 @@
-# hypoindex: Hypothetical Indexes for CockroachDB
+# hypoindex: Hypothetical Indexes Extension for CockroachDB
 
-This extension provides functionality similar to PostgreSQL's `hypopg` extension, allowing users to experiment with hypothetical indexes without actually creating them in the database.
+This extension enables users to experiment with hypothetical indexes without actually creating them in the database. It's similar to PostgreSQL's `hypopg` extension.
 
-## Current Status
+## Core Features
 
-This is a minimalist implementation to demonstrate the concept. Due to the complexity of integrating with CockroachDB's internal query optimizer, this extension currently provides a simplified API.
-
-## Features
-
-The extension supports:
-
-1. Storing hypothetical index definitions
-2. Simulating EXPLAIN output with hypothetical indexes
-
-## Building and Testing
-
-### Building with Bazel
-
-```bash
-bazel build //pkg/ext/hypoindex
-```
-
-### Testing the Example
-
-```bash
-bazel run //pkg/ext/hypoindex/example
-```
-
-## Future Improvements
-
-1. Connect to the internal query optimizer
-2. Leverage the existing HypotheticalTable implementation
-3. Provide accurate explain plans that truly reflect hypothetical index performance
+1. Create hypothetical index definitions stored in a system table
+2. Generate EXPLAIN plans showing how queries would perform with these hypothetical indexes
+3. Compare query costs with and without hypothetical indexes
+4. Provide recommendations for which indexes to create
 
 ## Architecture
 
-The extension has a simple architecture:
+The extension integrates with CockroachDB's query optimizer and uses the existing hypothetical table infrastructure:
 
-1. **Storage Layer**: A table to store hypothetical index definitions
-2. **API Layer**: Functions to create, list, and drop hypothetical indexes
-3. **Explain Implementation**: A function to simulate query plans with hypothetical indexes
+1. **Storage Layer**: Tables in the `pg_extension` schema store hypothetical index definitions
+2. **API Layer**: SQL functions for managing hypothetical indexes
+3. **Optimizer Integration**: Connects to CockroachDB's optimizer using `indexrec.HypotheticalTable`
+4. **Explain Implementation**: Shows query plans with hypothetical indexes
 
-## Usage Example
+## Implementation Details
 
-```sql
--- Create a hypothetical index
-SELECT pg_extension.hypo_create_index(
-  'public',        -- schema name
-  'users',         -- table name
-  'idx_users_name', -- index name
-  ARRAY['name'],   -- columns
-  ARRAY['email']   -- storing columns (optional)
-);
+### Core Components
 
--- Run EXPLAIN with hypothetical indexes
-SELECT pg_extension.hypo_explain('SELECT * FROM users WHERE name = ''John''');
-```
+1. **HypoIndexExplainer**: Main component that:
+   - Parses SQL queries
+   - Retrieves hypothetical index definitions
+   - Creates hypothetical tables with those indexes
+   - Runs the optimizer with these tables
+   - Formats the EXPLAIN output
 
-## Overview
+2. **SQL Functions**:
+   - `hypo_create_index()`: Creates a hypothetical index definition
+   - `hypo_drop_index()`: Removes a hypothetical index
+   - `hypo_drop_all_indexes()`: Clears all hypothetical indexes
+   - `hypo_list_indexes()`: Lists all defined hypothetical indexes
+   - `hypo_explain()`: Executes EXPLAIN with hypothetical indexes
 
-The `hypoindex` extension lets you:
+3. **Integration with CockroachDB**:
+   - Uses parser to analyze SQL queries
+   - Leverages `indexrec.BuildOptAndHypTableMaps` to create hypothetical tables
+   - Integrates with the optimizer to estimate query costs
 
-1. Create hypothetical indexes that only exist for query planning
-2. Run EXPLAIN plans to see how these hypothetical indexes would affect query performance
-3. Get recommendations for which indexes to create based on workload analysis
+## Usage Examples
 
-## Installation
-
-To install the extension:
-
-```sql
-CREATE EXTENSION hypoindex;
-```
-
-## Usage
-
-### Creating a hypothetical index
+### Creating a Hypothetical Index
 
 ```sql
 SELECT pg_extension.hypo_create_index(
-  'public',        -- schema name
-  'users',         -- table name
+  'public',        -- schema
+  'users',         -- table
   'idx_users_name', -- index name
-  ARRAY['name'],   -- columns
-  ARRAY['email']   -- storing columns (optional)
+  ARRAY['name'],   -- indexed columns
+  ARRAY['email']   -- stored columns
 );
 ```
 
-### Dropping a hypothetical index
+### Explaining a Query with Hypothetical Indexes
+
+```sql
+SELECT pg_extension.hypo_explain('
+  SELECT * FROM users WHERE name = ''John''
+');
+```
+
+### Dropping a Hypothetical Index
 
 ```sql
 SELECT pg_extension.hypo_drop_index('index_id_uuid');
 ```
 
-### Dropping all hypothetical indexes
+## Future Improvements
 
-```sql
-SELECT pg_extension.hypo_drop_all_indexes();
-```
-
-### Listing hypothetical indexes
-
-```sql
-SELECT * FROM pg_extension.hypo_list_indexes();
-```
-
-### Running EXPLAIN with hypothetical indexes
-
-```sql
-SELECT pg_extension.hypo_explain('SELECT * FROM users WHERE name = ''John''');
-```
-
-## Implementation Details
-
-This extension leverages CockroachDB's internal query optimizer and index recommendation system to simulate hypothetical indexes. The implementation:
-
-1. Creates a table to store hypothetical index definitions
-2. Provides SQL functions for creating, listing, and dropping hypothetical indexes
-3. Implements a custom function to run EXPLAIN with hypothetical indexes by:
-   - Creating hypothetical tables with the defined indexes
-   - Running the optimizer with these hypothetical tables
-   - Returning the resulting explain plan
-
-## Limitations
-
-- The extension cannot perfectly predict the exact performance impact of indexes
-- Some complex index types may not be fully supported
-- Results are estimations based on the optimizer's cost model
+1. **Enhanced Integration**: More complete integration with the CockroachDB extension system
+2. **Better Cost Estimation**: More accurate cost models for hypothetical indexes
+3. **Index Recommendations**: Automated recommendations based on workload analysis
+4. **Statistics**: Support for specifying hypothetical statistics for more accurate planning
 
 ## Development Status
 
-This extension is a work in progress and is not yet production-ready.
+This extension is under active development and ready for testing. It integrates with CockroachDB's optimizer and provides meaningful insights into how indexes would affect query performance.
+
+## Contributing
+
+Contributions are welcome! See the `IMPLEMENTATION.md` file for details on the internal architecture and implementation approach.
 
 ## License
 
