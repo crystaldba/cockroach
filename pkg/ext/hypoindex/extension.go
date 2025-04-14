@@ -189,6 +189,18 @@ func (m *mockSQLExecutorWithFixedIndexes) QueryBufferedEx(
 		return []tree.Datums{row}, nil
 	}
 
+	// // If this is a table lookup query from the system catalog
+	// if strings.Contains(query, "system.namespace") && strings.Contains(query, "schema") {
+	// 	// Return "public" for schema ID lookups
+	// 	schemaNameDatum := tree.NewDString("public")
+	// 	return []tree.Datums{{schemaNameDatum}}, nil
+	// }
+
+	// // For explain queries, return a mock EXPLAIN plan
+	// if strings.Contains(query, "EXPLAIN ") {
+	// 	return []tree.Datums{{tree.NewDString("Mock EXPLAIN Plan")}}, nil
+	// }
+
 	// Return empty results for any other query
 	return []tree.Datums{}, nil
 }
@@ -217,27 +229,4 @@ var hypoExplainFunc = func(ctx context.Context, evalCtx interface{}, args tree.D
 	}
 
 	return tree.NewDString(result), nil
-}
-
-// HypoExplainImpl is the implementation of the hypo_explain function for testing.
-func HypoExplainImpl(ctx context.Context, args []interface{}) (interface{}, error) {
-	// Get the query string from the first argument
-	queryString, ok := args[0].(string)
-	if !ok {
-		return nil, fmt.Errorf("expected string argument, got %T", args[0])
-	}
-
-	// Create a mock SQL executor
-	mockExecutor := &mockSQLExecutorWithFixedIndexes{}
-
-	// Create the explainer with our mock
-	explainer := NewHypoIndexExplainer(nil, mockExecutor)
-
-	// Run the explain query
-	result, err := explainer.ExplainQuery(ctx, queryString)
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
 }

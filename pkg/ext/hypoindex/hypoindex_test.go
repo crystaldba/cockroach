@@ -16,69 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHypoIndexExplainerCreation(t *testing.T) {
-	mockExecutor := &MockSQLExecutor{}
-	explainer := NewHypoIndexExplainer(nil, mockExecutor)
-	require.NotNil(t, explainer)
-}
-
-func TestHypoIndexExplainerExplain(t *testing.T) {
-	ctx := context.Background()
-
-	// Create mock executor that returns empty results
-	mockExecutor := &MockSQLExecutor{
-		QueryResults: map[string][]tree.Datums{
-			// Match any query with empty results
-			"": {},
-		},
-	}
-
-	explainer := NewHypoIndexExplainer(nil, mockExecutor)
-
-	result, err := explainer.ExplainQuery(ctx, "SELECT * FROM users WHERE name = 'John'")
-	require.NoError(t, err)
-	// require.Contains(t, result, "EXPLAIN with")
-	fmt.Println(result)
-}
-
-func TestHypotheticalIndexDef(t *testing.T) {
-	idxDef := HypotheticalIndexDef{
-		ID:          "00000000-0000-0000-0000-000000000001",
-		TableSchema: "public",
-		TableName:   "users",
-		IndexName:   "hypo_idx_users_name",
-		Columns:     []string{"name"},
-		Storing:     []string{"email"},
-		Unique:      false,
-		Inverted:    false,
-	}
-
-	require.Equal(t, "00000000-0000-0000-0000-000000000001", idxDef.ID)
-	require.Equal(t, "public", idxDef.TableSchema)
-	require.Equal(t, "users", idxDef.TableName)
-	require.Equal(t, "hypo_idx_users_name", idxDef.IndexName)
-	require.Equal(t, []string{"name"}, idxDef.Columns)
-	require.Equal(t, []string{"email"}, idxDef.Storing)
-	require.False(t, idxDef.Unique)
-	require.False(t, idxDef.Inverted)
-}
-
-func TestHypoExplainImpl(t *testing.T) {
-	ctx := context.Background()
-	queryString := "SELECT * FROM users WHERE name = 'John'"
-
-	args := []interface{}{queryString}
-	result, err := HypoExplainImpl(ctx, args)
-
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	strResult, ok := result.(string)
-	require.True(t, ok, "Expected result to be string")
-	// require.Contains(t, strResult, "EXPLAIN with")
-	fmt.Println(strResult)
-}
-
 // MockSQLExecutor implements the SQLExecutor interface for testing
 type MockSQLExecutor struct {
 	// QueryResults stores pre-defined results for queries
@@ -114,6 +51,115 @@ func (m *MockSQLExecutor) QueryBufferedEx(
 
 	// Return empty result by default
 	return []tree.Datums{}, nil
+}
+
+func TestHypoIndexExplainerCreation(t *testing.T) {
+	mockExecutor := &MockSQLExecutor{}
+	explainer := NewHypoIndexExplainer(nil, mockExecutor)
+	require.NotNil(t, explainer)
+}
+
+func TestHypoIndexExplainerExplain(t *testing.T) {
+	ctx := context.Background()
+
+	// Create mock executor that returns data for hypothetical indexes
+	mockExecutor := &MockSQLExecutor{
+		QueryResults: map[string][]tree.Datums{
+			// For the hypo_indexes query
+			fmt.Sprintf(`
+		SELECT 
+			id, 
+			table_schema, 
+			table_name, 
+			index_name, 
+			columns, 
+			storing, 
+			unique, 
+			inverted
+		FROM %s.hypo_indexes
+	`, catconstants.PgExtensionSchemaName): {createMockHypoIndexRow("users", "name")},
+
+			// For the fetch tables query
+			"/* fetch tables */": {tree.Datums{tree.NewDString("users")}},
+		},
+	}
+
+	explainer := NewHypoIndexExplainer(nil, mockExecutor)
+
+	result, err := explainer.ExplainQuery(ctx, "SELECT * FROM users WHERE name = 'John'")
+	require.NoError(t, err)
+	require.Contains(t, result, "EXPLAIN with")
+}
+
+// Helper function to create a mock row for a hypothetical index
+func createMockHypoIndexRow(tableName, columnName string) tree.Datums {
+	// Create a mock row for a hypothetical index
+	idDatum := tree.NewDString("00000000-0000-0000-0000-000000000001")
+	schemaDatum := tree.NewDString("public")
+	tableDatum := tree.NewDString(tableName)
+	indexNameDatum := tree.NewDString(fmt.Sprintf("hypo_idx_%s_%s", tableName, columnName))
+
+	// Create column array
+	columnsArray := tree.NewDArray(types.String)
+	_ = columnsArray.Append(tree.NewDString(columnName))
+
+	// Create storing array
+	storingArray := tree.NewDArray(types.String)
+	_ = storingArray.Append(tree.NewDString("email"))
+
+	// Create boolean values
+	uniqueDatum := tree.DBoolFalse
+	invertedDatum := tree.DBoolFalse
+
+	// Create a row with all the data
+	return tree.Datums{
+		idDatum,
+		schemaDatum,
+		tableDatum,
+		indexNameDatum,
+		columnsArray,
+		storingArray,
+		uniqueDatum,
+		invertedDatum,
+	}
+}
+
+func TestHypotheticalIndexDef(t *testing.T) {
+	idxDef := HypotheticalIndexDef{
+		ID:          "00000000-0000-0000-0000-000000000001",
+		TableSchema: "public",
+		TableName:   "users",
+		IndexName:   "hypo_idx_users_name",
+		Columns:     []string{"name"},
+		Storing:     []string{"email"},
+		Unique:      false,
+		Inverted:    false,
+	}
+
+	require.Equal(t, "00000000-0000-0000-0000-000000000001", idxDef.ID)
+	require.Equal(t, "public", idxDef.TableSchema)
+	require.Equal(t, "users", idxDef.TableName)
+	require.Equal(t, "hypo_idx_users_name", idxDef.IndexName)
+	require.Equal(t, []string{"name"}, idxDef.Columns)
+	require.Equal(t, []string{"email"}, idxDef.Storing)
+	require.False(t, idxDef.Unique)
+	require.False(t, idxDef.Inverted)
+}
+
+func TestHypoExplainImpl(t *testing.T) {
+	ctx := context.Background()
+	queryString := "SELECT * FROM users WHERE name = 'John'"
+
+	// Call HypoExplainImpl directly with the query string
+	args := []interface{}{queryString}
+	result, err := HypoExplainImpl(ctx, args)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	strResult, ok := result.(string)
+	require.True(t, ok, "Expected result to be string")
+	require.Contains(t, strResult, "EXPLAIN with")
 }
 
 func TestFetchHypotheticalIndexes(t *testing.T) {
