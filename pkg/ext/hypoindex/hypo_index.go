@@ -12,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/indexrec"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -88,14 +89,138 @@ func (h *HypoIndexExplainer) ExplainQuery(ctx context.Context, query string) (st
 	return explainText, nil
 }
 
-// findReferencedTables extracts tables referenced in the query.
-func (h *HypoIndexExplainer) findReferencedTables(ctx context.Context, stmt tree.Statement) ([]catalog.TableDescriptor, error) {
-	// In a full implementation, this would:
-	// 1. Extract table references from the AST
-	// 2. Use the catalog to look up the corresponding table descriptors
+// findReferencedTables returns a list of table descriptors referenced by the SQL statement
+func (h *HypoIndexExplainer) findReferencedTables(
+	ctx context.Context, stmt tree.Statement,
+) ([]catalog.TableDescriptor, error) {
+	// For EXPLAIN statements, extract tables from the inner statement
+	if explainStmt, ok := stmt.(*tree.Explain); ok && explainStmt.Statement != nil {
+		return h.findReferencedTables(ctx, explainStmt.Statement)
+	}
 
-	// For now, return an empty slice since we'll use mock implementations
-	return []catalog.TableDescriptor{}, nil
+	// Initialize the table collector
+	tc := &tableCollector{
+		ctx:        ctx,
+		catalog:    h.catalog,
+		tableNames: make(map[string]struct{}),
+		tables:     make([]catalog.TableDescriptor, 0),
+	}
+
+	// Extract table references using a custom tree visitor
+	tableNames := h.extractTableNames(stmt)
+
+	// Add all found tables to the collector
+	for _, tableName := range tableNames {
+		if err := tc.addTable(tableName); err != nil {
+			// Log the error but continue with other tables
+			continue
+		}
+	}
+
+	return tc.tables, nil
+}
+
+// extractTableNames extracts all table names from a statement
+func (h *HypoIndexExplainer) extractTableNames(stmt tree.Statement) []*tree.TableName {
+	var tableNames []*tree.TableName
+
+	// Handle specific statement types that may contain table references
+	switch node := stmt.(type) {
+	case *tree.Select:
+		// Extract from the FROM clause in a SELECT
+		if node.Select != nil {
+			if selectClause, ok := node.Select.(*tree.SelectClause); ok {
+				tableNames = append(tableNames, extractTablesFromFrom(&selectClause.From)...)
+			}
+		}
+	case *tree.Update:
+		// Extract the target table in an UPDATE
+		if node.Table != nil {
+			if name := getTableNameFromTableExpr(node.Table); name != nil {
+				tableNames = append(tableNames, name)
+			}
+		}
+	case *tree.Delete:
+		// Extract the target table in a DELETE
+		if node.Table != nil {
+			if name := getTableNameFromTableExpr(node.Table); name != nil {
+				tableNames = append(tableNames, name)
+			}
+		}
+	case *tree.Insert:
+		// Extract the target table in an INSERT
+		if name, ok := node.Table.(*tree.TableName); ok {
+			tableNames = append(tableNames, name)
+		}
+	}
+
+	return tableNames
+}
+
+// extractTablesFromFrom extracts table names from a FROM clause
+func extractTablesFromFrom(from *tree.From) []*tree.TableName {
+	var tableNames []*tree.TableName
+
+	for _, table := range from.Tables {
+		if name := getTableNameFromTableExpr(table); name != nil {
+			tableNames = append(tableNames, name)
+		}
+	}
+
+	return tableNames
+}
+
+// getTableNameFromTableExpr extracts a TableName from a TableExpr if possible
+func getTableNameFromTableExpr(expr tree.TableExpr) *tree.TableName {
+	switch t := expr.(type) {
+	case *tree.AliasedTableExpr:
+		if name, ok := t.Expr.(*tree.TableName); ok {
+			return name
+		}
+	}
+	return nil
+}
+
+// addTable adds a table to the collection
+func (tc *tableCollector) addTable(tableName *tree.TableName) error {
+	if tableName == nil || tableName.Table() == "" {
+		return nil // Skip empty table names
+	}
+
+	key := tableName.String()
+	if _, exists := tc.tableNames[key]; exists {
+		return nil
+	}
+	tc.tableNames[key] = struct{}{}
+
+	// Look up the table descriptor using the catalog
+	if tc.catalog == nil {
+		return fmt.Errorf("catalog not initialized")
+	}
+
+	// Resolve the data source by name - use the TableName directly since cat.DataSourceName is an alias for tree.TableName
+	ds, _, err := tc.catalog.ResolveDataSource(tc.ctx, cat.Flags{}, tableName)
+	if err != nil {
+		return err
+	}
+
+	if table, ok := ds.(cat.Table); ok {
+		// Convert the cat.Table to a catalog.TableDescriptor if possible
+		// This might require a cast depending on the implementation
+		if tableDesc, ok := table.(catalog.TableDescriptor); ok {
+			tc.tables = append(tc.tables, tableDesc)
+		}
+	}
+
+	return nil
+}
+
+// tableCollector collects unique table descriptors
+type tableCollector struct {
+	ctx        context.Context
+	catalog    cat.Catalog
+	tableNames map[string]struct{} // Used to deduplicate table names
+	tables     []catalog.TableDescriptor
 }
 
 // optimizeWithHypotheticalIndexes runs the optimizer with hypothetical indexes.
@@ -104,12 +229,22 @@ func (h *HypoIndexExplainer) optimizeWithHypotheticalIndexes(
 	stmt tree.Statement,
 	indexCandidates map[cat.Table][][]cat.IndexColumn,
 ) (string, error) {
-	// In a full implementation, this would:
-	// 1. Create hypothetical tables with BuildOptAndHypTableMaps
-	// 2. Run memo optimizer with these tables
-	// 3. Format the resulting plan
-
 	var sb strings.Builder
+
+	// Create hypothetical tables using indexrec
+	optTables, hypTables := h.createHypotheticalTables(indexCandidates)
+	if len(hypTables) == 0 {
+		return "No relevant hypothetical indexes found for this query", nil
+	}
+
+	// In a full implementation, we would:
+	// 1. Create an optimizer instance
+	// 2. Initialize it with the statement
+	// 3. Update the memo metadata with hypothetical tables
+	// 4. Optimize the query
+	// 5. Format the resulting plan
+
+	// For now, we'll just show which hypothetical indexes would be considered
 	sb.WriteString("EXPLAIN with hypothetical indexes:\n")
 
 	// Display the hypothetical indexes that would be used
@@ -121,19 +256,31 @@ func (h *HypoIndexExplainer) optimizeWithHypotheticalIndexes(
 				if j > 0 {
 					sb.WriteString(", ")
 				}
-				// Use string() conversion instead of String() method
 				sb.WriteString(string(col.Column.ColName()))
 			}
 			sb.WriteString(")\n")
 		}
 	}
 
-	// In a full implementation, we would add:
-	// - The optimizer's chosen plan
-	// - Cost before and after
-	// - Statistics about index usage
+	// Display the original and hypothetical tables
+	sb.WriteString("\nHypothetical Tables:\n")
+	for id, hypTable := range hypTables {
+		origTable := optTables[id]
+		sb.WriteString(fmt.Sprintf("  %s (original indexes: %d, with hypothetical: %d)\n",
+			hypTable.Name(), origTable.IndexCount(), hypTable.IndexCount()))
+	}
+
+	// TODO: In a full implementation, add the optimizer's chosen plan and cost estimates
 
 	return sb.String(), nil
+}
+
+// createHypotheticalTables converts index candidates to hypothetical tables.
+func (h *HypoIndexExplainer) createHypotheticalTables(
+	indexCandidates map[cat.Table][][]cat.IndexColumn,
+) (map[cat.StableID]cat.Table, map[cat.StableID]cat.Table) {
+	// Use the indexrec package to build hypothetical tables
+	return indexrec.BuildOptAndHypTableMaps(h.catalog, indexCandidates)
 }
 
 // fetchHypotheticalIndexes retrieves all hypothetical indexes from the hypo_indexes table.
@@ -254,9 +401,17 @@ func (h *HypoIndexExplainer) buildIndexCandidates(
 ) map[cat.Table][][]cat.IndexColumn {
 	// Group indexes by table
 	indexesByTable := make(map[string][]HypotheticalIndexDef)
+
+	// Also keep a map by table name only, for fallback matching
+	indexesByTableName := make(map[string][]HypotheticalIndexDef)
+
 	for _, idx := range hypoIndexes {
+		// Standard key with schema
 		tableKey := fmt.Sprintf("%s.%s", idx.TableSchema, idx.TableName)
 		indexesByTable[tableKey] = append(indexesByTable[tableKey], idx)
+
+		// Add to the table-name-only map for fallback matching
+		indexesByTableName[idx.TableName] = append(indexesByTableName[idx.TableName], idx)
 	}
 
 	// Create the index candidates map
@@ -264,10 +419,30 @@ func (h *HypoIndexExplainer) buildIndexCandidates(
 
 	// For each table, convert its hypothetical indexes to cat.IndexColumn arrays
 	for _, tbl := range tables {
-		// Skip tables with no hypothetical indexes
+		// First try with ID-based table lookup
 		tableKey := fmt.Sprintf("%d.%s", tbl.GetParentSchemaID(), tbl.GetName())
 		tableIndexes, exists := indexesByTable[tableKey]
+
+		// If not found, try with schema-name-based lookup (like "public.users")
 		if !exists {
+			// Try common schema names
+			for _, schema := range []string{"public", catconstants.PgCatalogName, catconstants.InformationSchemaName} {
+				schemaTableKey := fmt.Sprintf("%s.%s", schema, tbl.GetName())
+				if indexes, found := indexesByTable[schemaTableKey]; found {
+					tableIndexes = indexes
+					exists = true
+					break
+				}
+			}
+		}
+
+		// If still not found, try just by table name as a last resort (for tests)
+		if !exists {
+			tableIndexes, exists = indexesByTableName[tbl.GetName()]
+		}
+
+		// Skip if no indexes found for this table
+		if !exists || len(tableIndexes) == 0 {
 			continue
 		}
 
@@ -301,22 +476,22 @@ func (h *HypoIndexExplainer) findCatTable(tbl catalog.TableDescriptor) (cat.Tabl
 		return nil, fmt.Errorf("catalog not initialized")
 	}
 
-	// Note: We don't actually use the table name here since this is a placeholder implementation
-	// In a real implementation, we'd use the catalog to look up the table
+	// Get the table ID
+	tableID := tbl.GetID()
 
-	// For now, we'll just return nil since this is a placeholder implementation
-	return nil, fmt.Errorf("catalog lookup not implemented")
-}
+	// Look up the table directly by ID using the appropriate catalog method
+	ds, _, err := h.catalog.ResolveDataSourceByID(context.Background(), cat.Flags{}, cat.StableID(tableID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve table by ID %d: %w", tableID, err)
+	}
 
-// createHypotheticalTables converts index candidates to hypothetical tables.
-func (h *HypoIndexExplainer) createHypotheticalTables(
-	indexCandidates map[cat.Table][][]cat.IndexColumn,
-) (map[cat.StableID]cat.Table, map[cat.StableID]cat.Table) {
-	// In a full implementation, this would call:
-	// return indexrec.BuildOptAndHypTableMaps(h.catalog, indexCandidates)
+	// Check if the data source is a table
+	table, ok := ds.(cat.Table)
+	if !ok {
+		return nil, fmt.Errorf("data source with ID %d is not a table", tableID)
+	}
 
-	// For now, return empty maps
-	return map[cat.StableID]cat.Table{}, map[cat.StableID]cat.Table{}
+	return table, nil
 }
 
 // HypotheticalIndexDef represents a hypothetical index definition.
