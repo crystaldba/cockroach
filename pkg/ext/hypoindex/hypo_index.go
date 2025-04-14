@@ -13,21 +13,43 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
 
+// SQLExecutor is an interface for executing SQL queries.
+type SQLExecutor interface {
+	// QueryBufferedEx executes a SQL query and returns the results buffered.
+	QueryBufferedEx(
+		ctx context.Context,
+		opName string,
+		txn interface{},
+		override interface{},
+		query string,
+		qargs ...interface{},
+	) ([]tree.Datums, error)
+}
+
 // HypoIndexExplainer is responsible for running EXPLAIN with hypothetical indexes.
 type HypoIndexExplainer struct {
-	evalCtx interface{}
-	catalog cat.Catalog
+	evalCtx     interface{}
+	catalog     cat.Catalog
+	sqlExecutor SQLExecutor
 }
 
 // NewHypoIndexExplainer creates a new HypoIndexExplainer.
-func NewHypoIndexExplainer(evalCtx interface{}) *HypoIndexExplainer {
+func NewHypoIndexExplainer(evalCtx interface{}, sqlExecutor SQLExecutor) *HypoIndexExplainer {
 	return &HypoIndexExplainer{
-		evalCtx: evalCtx,
-		catalog: nil,
+		evalCtx:     evalCtx,
+		catalog:     nil,
+		sqlExecutor: sqlExecutor,
 	}
+}
+
+// SetCatalog sets the catalog for the HypoIndexExplainer.
+// This can be called after creation if the catalog is not available at construction time.
+func (h *HypoIndexExplainer) SetCatalog(catalog cat.Catalog) {
+	h.catalog = catalog
 }
 
 // ExplainQuery runs EXPLAIN on the given query with hypothetical indexes.
@@ -116,21 +138,113 @@ func (h *HypoIndexExplainer) optimizeWithHypotheticalIndexes(
 
 // fetchHypotheticalIndexes retrieves all hypothetical indexes from the hypo_indexes table.
 func (h *HypoIndexExplainer) fetchHypotheticalIndexes(ctx context.Context) ([]HypotheticalIndexDef, error) {
-	// In a real implementation, this would query the pg_extension.hypo_indexes table
+	// The table should be in the pg_extension schema
+	query := fmt.Sprintf(`
+		SELECT 
+			id, 
+			table_schema, 
+			table_name, 
+			index_name, 
+			columns, 
+			storing, 
+			unique, 
+			inverted
+		FROM %s.hypo_indexes
+	`, catconstants.PgExtensionSchemaName)
 
-	// For now, return a mock implementation
-	return []HypotheticalIndexDef{
-		{
-			ID:          "00000000-0000-0000-0000-000000000001",
-			TableSchema: "public",
-			TableName:   "users",
-			IndexName:   "hypo_idx_users_name",
-			Columns:     []string{"name"},
-			Storing:     []string{"email"},
-			Unique:      false,
-			Inverted:    false,
-		},
-	}, nil
+	// We need an executor to run the query
+	if h.sqlExecutor == nil {
+		return nil, fmt.Errorf("SQL executor not initialized")
+	}
+
+	// Execute the query
+	rows, err := h.sqlExecutor.QueryBufferedEx(
+		ctx,
+		"hypo-fetch-indexes",
+		nil, /* txn */
+		nil, /* override */
+		query,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("error querying hypo_indexes table: %w", err)
+	}
+
+	// Process the results
+	var result []HypotheticalIndexDef
+	for _, row := range rows {
+		if len(row) != 8 {
+			return nil, fmt.Errorf("unexpected row format: got %d columns, expected 8", len(row))
+		}
+
+		// Extract the values from the row
+		id := string(tree.MustBeDString(row[0]))
+		tableSchema := string(tree.MustBeDString(row[1]))
+		tableName := string(tree.MustBeDString(row[2]))
+		indexName := string(tree.MustBeDString(row[3]))
+
+		// Extract string array values
+		columnsArray := row[4]
+		storingArray := row[5]
+
+		// Convert to Go string slices
+		columns, err := h.extractStringArray(columnsArray)
+		if err != nil {
+			return nil, fmt.Errorf("error extracting columns array: %w", err)
+		}
+
+		var storing []string
+		if storingArray != tree.DNull {
+			storing, err = h.extractStringArray(storingArray)
+			if err != nil {
+				return nil, fmt.Errorf("error extracting storing array: %w", err)
+			}
+		}
+
+		// Extract boolean values
+		unique := row[6] != tree.DBoolFalse
+		inverted := row[7] != tree.DBoolFalse
+
+		result = append(result, HypotheticalIndexDef{
+			ID:          id,
+			TableSchema: tableSchema,
+			TableName:   tableName,
+			IndexName:   indexName,
+			Columns:     columns,
+			Storing:     storing,
+			Unique:      unique,
+			Inverted:    inverted,
+		})
+	}
+
+	// If no indexes found, return an empty slice
+	if len(result) == 0 {
+		return []HypotheticalIndexDef{}, nil
+	}
+
+	return result, nil
+}
+
+// extractStringArray converts a tree.Datum containing a string array into a Go string slice.
+func (h *HypoIndexExplainer) extractStringArray(datum tree.Datum) ([]string, error) {
+	if datum == tree.DNull {
+		return nil, nil
+	}
+
+	array, ok := datum.(*tree.DArray)
+	if !ok {
+		return nil, fmt.Errorf("expected string array, got %T", datum)
+	}
+
+	result := make([]string, len(array.Array))
+	for i, val := range array.Array {
+		str, ok := val.(*tree.DString)
+		if !ok {
+			return nil, fmt.Errorf("expected string in array, got %T", val)
+		}
+		result[i] = string(*str)
+	}
+
+	return result, nil
 }
 
 // buildIndexCandidates creates index candidates for the optimizer based on hypothetical index definitions.
@@ -138,13 +252,60 @@ func (h *HypoIndexExplainer) buildIndexCandidates(
 	tables []catalog.TableDescriptor,
 	hypoIndexes []HypotheticalIndexDef,
 ) map[cat.Table][][]cat.IndexColumn {
-	// In a full implementation, this would:
-	// 1. Group indexes by table
-	// 2. Convert HypotheticalIndexDef to cat.IndexColumn arrays
-	// 3. Create a properly formatted map for indexrec.BuildOptAndHypTableMaps
+	// Group indexes by table
+	indexesByTable := make(map[string][]HypotheticalIndexDef)
+	for _, idx := range hypoIndexes {
+		tableKey := fmt.Sprintf("%s.%s", idx.TableSchema, idx.TableName)
+		indexesByTable[tableKey] = append(indexesByTable[tableKey], idx)
+	}
 
-	// For now, return an empty map
-	return map[cat.Table][][]cat.IndexColumn{}
+	// Create the index candidates map
+	result := make(map[cat.Table][][]cat.IndexColumn)
+
+	// For each table, convert its hypothetical indexes to cat.IndexColumn arrays
+	for _, tbl := range tables {
+		// Skip tables with no hypothetical indexes
+		tableKey := fmt.Sprintf("%d.%s", tbl.GetParentSchemaID(), tbl.GetName())
+		tableIndexes, exists := indexesByTable[tableKey]
+		if !exists {
+			continue
+		}
+
+		// Get the cat.Table for this table descriptor
+		catTable, err := h.findCatTable(tbl)
+		if err != nil {
+			// Log error and skip this table
+			continue
+		}
+
+		// Convert each hypothetical index to an array of IndexColumns
+		var indexCols [][]cat.IndexColumn
+		for _, idx := range tableIndexes {
+			cols := idx.convertToIndexCandidate(catTable)
+			if len(cols) > 0 {
+				indexCols = append(indexCols, cols)
+			}
+		}
+
+		if len(indexCols) > 0 {
+			result[catTable] = indexCols
+		}
+	}
+
+	return result
+}
+
+// findCatTable finds the cat.Table corresponding to a catalog.TableDescriptor
+func (h *HypoIndexExplainer) findCatTable(tbl catalog.TableDescriptor) (cat.Table, error) {
+	if h.catalog == nil {
+		return nil, fmt.Errorf("catalog not initialized")
+	}
+
+	// Note: We don't actually use the table name here since this is a placeholder implementation
+	// In a real implementation, we'd use the catalog to look up the table
+
+	// For now, we'll just return nil since this is a placeholder implementation
+	return nil, fmt.Errorf("catalog lookup not implemented")
 }
 
 // createHypotheticalTables converts index candidates to hypothetical tables.
@@ -172,11 +333,35 @@ type HypotheticalIndexDef struct {
 
 // convertToIndexCandidate converts a HypotheticalIndexDef to a slice of cat.IndexColumn.
 func (h *HypotheticalIndexDef) convertToIndexCandidate(table cat.Table) []cat.IndexColumn {
-	// In a full implementation, this would:
-	// 1. Match column names to cat.Column objects
-	// 2. Create cat.IndexColumn entries for each column
-	// 3. Handle inverted indexes specially
+	result := make([]cat.IndexColumn, 0, len(h.Columns))
 
-	// For now, return an empty slice
-	return []cat.IndexColumn{}
+	// Process key columns
+	for _, colName := range h.Columns {
+		// Find the column in the table
+		col, err := findColumnByName(table, tree.Name(colName))
+		if err != nil {
+			// Skip this column if not found
+			continue
+		}
+
+		// Create an IndexColumn
+		result = append(result, cat.IndexColumn{
+			Column:     col,
+			Descending: false, // Default to ascending
+			// We could extend HypotheticalIndexDef to support descending columns
+		})
+	}
+
+	return result
+}
+
+// findColumnByName looks up a column by name in a table
+func findColumnByName(table cat.Table, name tree.Name) (*cat.Column, error) {
+	for i := 0; i < table.ColumnCount(); i++ {
+		col := table.Column(i)
+		if col.ColName() == name {
+			return col, nil
+		}
+	}
+	return nil, fmt.Errorf("column %s not found in table %s", name, table.Name())
 }

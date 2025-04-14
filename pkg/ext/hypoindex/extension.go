@@ -8,9 +8,11 @@ package hypoindex
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
 // ExtensionExecutor represents an interface for executing SQL in the extension context.
@@ -140,6 +142,57 @@ $$ LANGUAGE sql;`, catconstants.PgExtensionSchemaName, catconstants.PgExtensionS
 	return nil
 }
 
+// mockSQLExecutorWithFixedIndexes is a simple SQLExecutor that returns fixed hypothetical indexes
+type mockSQLExecutorWithFixedIndexes struct{}
+
+// QueryBufferedEx implements the SQLExecutor interface
+func (m *mockSQLExecutorWithFixedIndexes) QueryBufferedEx(
+	ctx context.Context,
+	opName string,
+	txn interface{},
+	override interface{},
+	query string,
+	qargs ...interface{},
+) ([]tree.Datums, error) {
+	// Check if this is the hypo_indexes query
+	if strings.Contains(query, "hypo_indexes") {
+		// Create a mock row for a hypothetical index
+		idDatum := tree.NewDString("00000000-0000-0000-0000-000000000001")
+		schemaDatum := tree.NewDString("public")
+		tableDatum := tree.NewDString("users")
+		indexNameDatum := tree.NewDString("hypo_idx_users_name")
+
+		// Create column array
+		columnsArray := tree.NewDArray(types.String)
+		_ = columnsArray.Append(tree.NewDString("name"))
+
+		// Create storing array
+		storingArray := tree.NewDArray(types.String)
+		_ = storingArray.Append(tree.NewDString("email"))
+
+		// Create boolean values
+		uniqueDatum := tree.DBoolFalse
+		invertedDatum := tree.DBoolFalse
+
+		// Create a row with all the data
+		row := tree.Datums{
+			idDatum,
+			schemaDatum,
+			tableDatum,
+			indexNameDatum,
+			columnsArray,
+			storingArray,
+			uniqueDatum,
+			invertedDatum,
+		}
+
+		return []tree.Datums{row}, nil
+	}
+
+	// Return empty results for any other query
+	return []tree.Datums{}, nil
+}
+
 // hypoExplainFunc is the SQL function implementation for hypo_explain
 var hypoExplainFunc = func(ctx context.Context, evalCtx interface{}, args tree.Datums) (tree.Datum, error) {
 	if len(args) != 1 {
@@ -151,8 +204,13 @@ var hypoExplainFunc = func(ctx context.Context, evalCtx interface{}, args tree.D
 		return nil, fmt.Errorf("hypo_explain requires a string argument")
 	}
 
-	// Create an explainer and run the query
-	explainer := NewHypoIndexExplainer(evalCtx)
+	// Create a mock SQL executor
+	mockExecutor := &mockSQLExecutorWithFixedIndexes{}
+
+	// Create the explainer with our mock executor
+	explainer := NewHypoIndexExplainer(evalCtx, mockExecutor)
+
+	// Run the explain query
 	result, err := explainer.ExplainQuery(ctx, string(queryString))
 	if err != nil {
 		return nil, err
@@ -169,8 +227,13 @@ func HypoExplainImpl(ctx context.Context, args []interface{}) (interface{}, erro
 		return nil, fmt.Errorf("expected string argument, got %T", args[0])
 	}
 
-	// Create an explainer and run the query
-	explainer := NewHypoIndexExplainer(nil)
+	// Create a mock SQL executor
+	mockExecutor := &mockSQLExecutorWithFixedIndexes{}
+
+	// Create the explainer with our mock
+	explainer := NewHypoIndexExplainer(nil, mockExecutor)
+
+	// Run the explain query
 	result, err := explainer.ExplainQuery(ctx, queryString)
 	if err != nil {
 		return nil, err

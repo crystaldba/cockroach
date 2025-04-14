@@ -20,6 +20,7 @@ go_library(
         "//pkg/sql/parser",
         "//pkg/sql/sem/catconstants",
         "//pkg/sql/sem/tree",
+        "//pkg/sql/types",
     ],
 )
 
@@ -29,5 +30,8 @@ go_test(
     embed = [":hypoindex"],
     deps = [
         "@com_github_stretchr_testify//require",
+        "//pkg/sql/sem/tree",
+        "//pkg/sql/types",
+        "//pkg/sql/sem/catconstants",
     ],
 ) 
