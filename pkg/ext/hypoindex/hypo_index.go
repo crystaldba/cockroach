@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/indexrec"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -417,16 +418,32 @@ func (h *HypoIndexExplainer) buildIndexCandidates(
 	// Create the index candidates map
 	result := make(map[cat.Table][][]cat.IndexColumn)
 
+	// Common schema names to try when exact matching fails
+	commonSchemas := []string{"public", catconstants.PgCatalogName, catconstants.InformationSchemaName}
+
 	// For each table, convert its hypothetical indexes to cat.IndexColumn arrays
 	for _, tbl := range tables {
-		// First try with ID-based table lookup
-		tableKey := fmt.Sprintf("%d.%s", tbl.GetParentSchemaID(), tbl.GetName())
-		tableIndexes, exists := indexesByTable[tableKey]
+		var tableIndexes []HypotheticalIndexDef
+		exists := false
 
-		// If not found, try with schema-name-based lookup (like "public.users")
+		// Try all matching strategies in order of specificity:
+
+		// 1. First, try to get the actual schema name if catalog is available
+		if h.catalog != nil {
+			// Try to resolve the schema name from the ID
+			schemaName := getSchemaNameForID(tbl.GetParentSchemaID())
+			if schemaName != "" {
+				schemaTableKey := fmt.Sprintf("%s.%s", schemaName, tbl.GetName())
+				if indexes, found := indexesByTable[schemaTableKey]; found {
+					tableIndexes = indexes
+					exists = true
+				}
+			}
+		}
+
+		// 2. If schema name lookup failed, try common schema names
 		if !exists {
-			// Try common schema names
-			for _, schema := range []string{"public", catconstants.PgCatalogName, catconstants.InformationSchemaName} {
+			for _, schema := range commonSchemas {
 				schemaTableKey := fmt.Sprintf("%s.%s", schema, tbl.GetName())
 				if indexes, found := indexesByTable[schemaTableKey]; found {
 					tableIndexes = indexes
@@ -436,7 +453,7 @@ func (h *HypoIndexExplainer) buildIndexCandidates(
 			}
 		}
 
-		// If still not found, try just by table name as a last resort (for tests)
+		// 3. If still not found, try just by table name as a last resort (for tests)
 		if !exists {
 			tableIndexes, exists = indexesByTableName[tbl.GetName()]
 		}
@@ -468,6 +485,21 @@ func (h *HypoIndexExplainer) buildIndexCandidates(
 	}
 
 	return result
+}
+
+// getSchemaNameForID returns a known schema name for a schema ID
+// This is a simple helper that returns common schema names for known IDs
+func getSchemaNameForID(schemaID descpb.ID) string {
+	switch schemaID {
+	case 29: // Common ID for public schema
+		return "public"
+	case 30: // Common ID for pg_catalog
+		return catconstants.PgCatalogName
+	case 31: // Common ID for information_schema
+		return catconstants.InformationSchemaName
+	default:
+		return "" // Unknown schema ID
+	}
 }
 
 // findCatTable finds the cat.Table corresponding to a catalog.TableDescriptor

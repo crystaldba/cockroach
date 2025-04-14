@@ -12,6 +12,7 @@ go_library(
     deps = [
         "//pkg/sql",
         "//pkg/sql/catalog",
+        "//pkg/sql/catalog/descpb",
         "//pkg/sql/opt",
         "//pkg/sql/opt/cat",
         "//pkg/sql/opt/indexrec",
