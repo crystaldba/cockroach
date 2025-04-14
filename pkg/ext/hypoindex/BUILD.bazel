@@ -1,0 +1,41 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "hypoindex",
+    srcs = [
+        "extension.go",
+        "hypo_index.go",
+        "register.go",
+    ],
+    importpath = "github.com/cockroachdb/cockroach/pkg/ext/hypoindex",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/sql",
+        "//pkg/sql/catalog",
+        "//pkg/sql/catalog/catpb",
+        "//pkg/sql/catalog/descpb",
+        "//pkg/sql/catalog/descs",
+        "//pkg/sql/opt",
+        "//pkg/sql/opt/cat",
+        "//pkg/sql/opt/indexrec",
+        "//pkg/sql/opt/memo",
+        "//pkg/sql/parser",
+        "//pkg/sql/sem/catconstants",
+        "//pkg/sql/sem/idxtype",
+        "//pkg/sql/sem/tree",
+        "//pkg/sql/sqlutil",
+        "//pkg/sql/types",
+    ],
+)
+
+go_test(
+    name = "hypoindex_test",
+    srcs = ["hypoindex_test.go"],
+    embed = [":hypoindex"],
+    deps = [
+        "//pkg/sql/parser",
+        "//pkg/sql/sem/tree",
+        "//pkg/util/leaktest",
+        "@com_github_stretchr_testify//require",
+    ],
+) 
