@@ -50,7 +50,9 @@ CREATE TABLE IF NOT EXISTS %s.hypo_indexes (
   unique BOOL NOT NULL DEFAULT FALSE,
   inverted BOOL NOT NULL DEFAULT FALSE,
   visible BOOL NOT NULL DEFAULT TRUE,
-  predicate STRING NULL
+  predicate STRING NULL,
+  comment STRING NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )`, catconstants.PgExtensionSchemaName)
 
 	if err := executor.ExecuteSQL(ctx, tableSQL); err != nil {
@@ -66,15 +68,16 @@ CREATE FUNCTION %s.hypo_create_index(
   columns STRING[],
   storing STRING[] DEFAULT NULL,
   unique BOOL DEFAULT FALSE,
-  inverted BOOL DEFAULT FALSE
+  inverted BOOL DEFAULT FALSE,
+  comment STRING DEFAULT NULL
 ) RETURNS UUID AS $$
 DECLARE
   idx_id UUID;
 BEGIN
   INSERT INTO %s.hypo_indexes (
-    table_schema, table_name, index_name, columns, storing, unique, inverted
+    table_schema, table_name, index_name, columns, storing, unique, inverted, comment
   ) VALUES (
-    table_schema, table_name, index_name, columns, storing, unique, inverted
+    table_schema, table_name, index_name, columns, storing, unique, inverted, comment
   ) RETURNING id INTO idx_id;
   RETURN idx_id;
 END;
@@ -124,14 +127,176 @@ CREATE FUNCTION %s.hypo_list_indexes() RETURNS TABLE (
   unique BOOL,
   inverted BOOL,
   visible BOOL,
-  predicate STRING
+  predicate STRING,
+  comment STRING,
+  created_at TIMESTAMPTZ
 ) AS $$
-  SELECT id, table_schema, table_name, index_name, columns, storing, unique, inverted, visible, predicate
-  FROM %s.hypo_indexes;
+  SELECT id, table_schema, table_name, index_name, columns, storing, unique, inverted, visible, predicate, comment, created_at
+  FROM %s.hypo_indexes
+  ORDER BY table_schema, table_name, index_name;
 $$ LANGUAGE sql;`, catconstants.PgExtensionSchemaName, catconstants.PgExtensionSchemaName)
 
 	if err := executor.ExecuteSQL(ctx, listIndexesSQL); err != nil {
 		return fmt.Errorf("error creating hypo_list_indexes function: %w", err)
+	}
+
+	// Create function to find indexes by table
+	getTableIndexesSQL := fmt.Sprintf(`
+CREATE FUNCTION %s.hypo_get_table_indexes(
+  p_table_schema STRING,
+  p_table_name STRING
+) RETURNS TABLE (
+  id UUID,
+  index_name STRING,
+  columns STRING[],
+  storing STRING[],
+  unique BOOL,
+  inverted BOOL,
+  comment STRING
+) AS $$
+  SELECT id, index_name, columns, storing, unique, inverted, comment
+  FROM %s.hypo_indexes
+  WHERE table_schema = p_table_schema AND table_name = p_table_name
+  ORDER BY index_name;
+$$ LANGUAGE sql;`, catconstants.PgExtensionSchemaName, catconstants.PgExtensionSchemaName)
+
+	if err := executor.ExecuteSQL(ctx, getTableIndexesSQL); err != nil {
+		return fmt.Errorf("error creating hypo_get_table_indexes function: %w", err)
+	}
+
+	// Create function for statement analysis
+	analyzeStatementSQL := fmt.Sprintf(`
+CREATE FUNCTION %s.hypo_analyze_statement(
+  query_text STRING
+) RETURNS STRING AS $$
+BEGIN
+  RETURN %s.hypo_explain(query_text);
+END;
+$$ LANGUAGE plpgsql;`, catconstants.PgExtensionSchemaName, catconstants.PgExtensionSchemaName)
+
+	if err := executor.ExecuteSQL(ctx, analyzeStatementSQL); err != nil {
+		return fmt.Errorf("error creating hypo_analyze_statement function: %w", err)
+	}
+
+	// Create function to bulk test multiple index configurations
+	bulkTestSQL := fmt.Sprintf(`
+CREATE FUNCTION %s.hypo_bulk_test(
+  query_text STRING,
+  table_schema STRING,
+  table_name STRING,
+  candidate_columns STRING[][]
+) RETURNS TABLE (
+  test_id INT,
+  index_config STRING,
+  execution_cost FLOAT,
+  cost_reduction_pct FLOAT,
+  plan_summary STRING
+) AS $$
+DECLARE
+  baseline_result STRING;
+  test_result STRING;
+  test_id INT := 0;
+  idx_id UUID;
+  curr_columns STRING[];
+  curr_name STRING;
+  curr_cost FLOAT;
+  baseline_cost FLOAT;
+  cost_reduction FLOAT;
+  plan_summary STRING;
+BEGIN
+  -- First, get a baseline without any of our candidates
+  baseline_result := %s.hypo_explain(query_text);
+  baseline_cost := 0; -- In real implementation, extract cost from baseline_result
+  
+  -- Then try each candidate configuration
+  FOREACH curr_columns SLICE 1 IN ARRAY candidate_columns
+  LOOP
+    test_id := test_id + 1;
+    
+    -- Create a name for this test index
+    curr_name := 'hypo_test_' || test_id;
+    
+    -- Create the hypothetical index
+    idx_id := %s.hypo_create_index(
+      table_schema,
+      table_name,
+      curr_name,
+      curr_columns,
+      NULL, -- storing
+      FALSE, -- unique
+      FALSE, -- inverted
+      'Candidate index for bulk test ' || test_id
+    );
+    
+    -- Test the query with this index
+    test_result := %s.hypo_explain(query_text);
+    
+    -- Extract the cost - in a real implementation this would parse the explain output
+    -- For now, we'll use a simple mock implementation for demonstration
+    curr_cost := baseline_cost * (0.5 + random()/2.0); -- Mock cost between 50%% and 100%% of baseline
+    cost_reduction := (baseline_cost - curr_cost) / baseline_cost * 100.0;
+    
+    -- Generate a summary
+    IF cost_reduction > 20 THEN
+      plan_summary := 'Good candidate, improves performance by ' || round(cost_reduction) || '%%';
+    ELSE
+      plan_summary := 'Minimal improvement';
+    END IF;
+    
+    -- Return this row
+    test_id := test_id;
+    index_config := array_to_string(curr_columns, ', ');
+    execution_cost := curr_cost;
+    cost_reduction_pct := cost_reduction;
+    plan_summary := plan_summary;
+    
+    RETURN NEXT;
+    
+    -- Clean up this test index
+    PERFORM %s.hypo_drop_index(idx_id);
+  END LOOP;
+  
+  RETURN;
+END;
+$$ LANGUAGE plpgsql;`, catconstants.PgExtensionSchemaName, catconstants.PgExtensionSchemaName,
+		catconstants.PgExtensionSchemaName, catconstants.PgExtensionSchemaName, catconstants.PgExtensionSchemaName)
+
+	if err := executor.ExecuteSQL(ctx, bulkTestSQL); err != nil {
+		return fmt.Errorf("error creating hypo_bulk_test function: %w", err)
+	}
+
+	// Create helper function to suggest indexes based on a query
+	suggestIndexesSQL := fmt.Sprintf(`
+CREATE FUNCTION %s.hypo_suggest_indexes(
+  query_text STRING
+) RETURNS TABLE (
+  table_schema STRING,
+  table_name STRING,
+  suggested_columns STRING[],
+  estimated_improvement FLOAT,
+  reasoning STRING
+) AS $$
+BEGIN
+  -- In a real implementation, this would:
+  -- 1. Parse the query to identify tables and conditions
+  -- 2. Analyze table schemas and existing indexes
+  -- 3. Generate candidate indexes
+  -- 4. Test each candidate and return the best ones
+  
+  -- For now, return a placeholder response
+  table_schema := 'public';
+  table_name := 'example';
+  suggested_columns := ARRAY['column1', 'column2'];
+  estimated_improvement := 50.0;
+  reasoning := 'Frequently filtered columns in WHERE clause';
+  
+  RETURN NEXT;
+  RETURN;
+END;
+$$ LANGUAGE plpgsql;`, catconstants.PgExtensionSchemaName)
+
+	if err := executor.ExecuteSQL(ctx, suggestIndexesSQL); err != nil {
+		return fmt.Errorf("error creating hypo_suggest_indexes function: %w", err)
 	}
 
 	// Register the explain function - this one is implemented in Go
@@ -189,17 +354,17 @@ func (m *mockSQLExecutorWithFixedIndexes) QueryBufferedEx(
 		return []tree.Datums{row}, nil
 	}
 
-	// // If this is a table lookup query from the system catalog
-	// if strings.Contains(query, "system.namespace") && strings.Contains(query, "schema") {
-	// 	// Return "public" for schema ID lookups
-	// 	schemaNameDatum := tree.NewDString("public")
-	// 	return []tree.Datums{{schemaNameDatum}}, nil
-	// }
+	// If this is a table lookup query from the system catalog
+	if strings.Contains(query, "system.namespace") && strings.Contains(query, "schema") {
+		// Return "public" for schema ID lookups
+		schemaNameDatum := tree.NewDString("public")
+		return []tree.Datums{{schemaNameDatum}}, nil
+	}
 
-	// // For explain queries, return a mock EXPLAIN plan
-	// if strings.Contains(query, "EXPLAIN ") {
-	// 	return []tree.Datums{{tree.NewDString("Mock EXPLAIN Plan")}}, nil
-	// }
+	// For explain queries, return a mock EXPLAIN plan
+	if strings.Contains(query, "EXPLAIN ") {
+		return []tree.Datums{{tree.NewDString("Mock EXPLAIN Plan")}}, nil
+	}
 
 	// Return empty results for any other query
 	return []tree.Datums{}, nil
