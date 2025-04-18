@@ -219,6 +219,36 @@ var regularBuiltins = map[string]builtinDefinition{
 	"char_length":      lengthImpls(false /* includeBitOverload */),
 	"character_length": lengthImpls(false /* includeBitOverload */),
 
+	// hypo_index_explain analyzes a SQL query using hypothetical indexes.
+	"hypo_index_explain": makeBuiltin(defProps(),
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "query", Typ: types.String},
+				{Name: "indexes", Typ: types.AnyArray},
+			},
+			ReturnType: tree.FixedReturnType(types.String),
+			Fn:         hypoIndexExplain,
+			Info: "Generates an EXPLAIN plan for a query as if the specified hypothetical indexes existed.\n" +
+				"`query` is the SQL query to analyze.\n" +
+				"`indexes` is an array of CREATE INDEX statements defining the hypothetical indexes.",
+			Volatility: volatility.Stable,
+		},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "query", Typ: types.String},
+				{Name: "indexes", Typ: types.AnyArray},
+				{Name: "options", Typ: types.String},
+			},
+			ReturnType: tree.FixedReturnType(types.String),
+			Fn:         hypoIndexExplain,
+			Info: "Generates an EXPLAIN plan for a query as if the specified hypothetical indexes existed.\n" +
+				"`query` is the SQL query to analyze.\n" +
+				"`indexes` is an array of CREATE INDEX statements defining the hypothetical indexes.\n" +
+				"`options` is a string of space-separated explain options (e.g., 'VERBOSE TYPES').",
+			Volatility: volatility.Stable,
+		},
+	),
+
 	"bit_length": makeBuiltin(tree.FunctionProperties{Category: builtinconstants.CategoryString},
 		stringOverload1(
 			func(_ context.Context, _ *eval.Context, s string) (tree.Datum, error) {
@@ -5659,7 +5689,6 @@ SELECT
 			Info: "repair_catalog_corruption(descriptor_id,corruption) attempts to repair corrupt" +
 				" records in system tables associated with that descriptor id",
 			Volatility: volatility.Volatile,
-			Language:   tree.RoutineLangSQL,
 		},
 	),
 
@@ -5684,7 +5713,7 @@ SELECT
 				// We construct the errors below via %s as the
 				// message may contain PII.
 				if errCode == "" {
-					return nil, errors.Newf("%s", msg)
+					return nil, pgerror.Newf(pgcode.MakeCode(errCode), "%s", msg)
 				}
 				return nil, pgerror.Newf(pgcode.MakeCode(errCode), "%s", msg)
 			},
@@ -10776,10 +10805,10 @@ func regexpReplace(evalCtx *eval.Context, s, pattern, to, sqlFlags string) (tree
 		// We write out `to` into `newString` in chunks, flushing out the next chunk
 		// when we hit a `\\` or a backreference.
 		// chunkStart is the start of the next chunk we will flush out.
-		chunkStart := 0
 		// i is the current position in the replacement text that we are scanning
 		// through.
 		i := 0
+		chunkStart := 0
 		for i < len(to) {
 			if to[i] == '\\' && i+1 < len(to) {
 				i++

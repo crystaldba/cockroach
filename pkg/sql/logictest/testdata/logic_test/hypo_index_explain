@@ -1,0 +1,74 @@
+# Tests for the hypo_index_explain built-in function
+
+statement ok
+CREATE TABLE test_table (a INT, b INT, c INT)
+
+# Basic functionality with simple query and one index
+query T
+SELECT hypo_index_explain('SELECT * FROM test_table WHERE a = 1', ARRAY['CREATE INDEX idx_a ON test_table (a)'])
+----
+Query: SELECT * FROM test_table WHERE a = 1
+
+Hypothetical Indexes:
+1: CREATE INDEX idx_a ON test_table (a)
+
+In the next phase, this will be replaced with the actual EXPLAIN output.
+
+# Test with multiple indexes
+query T
+SELECT hypo_index_explain(
+  'SELECT * FROM test_table WHERE a = 1 AND b = 2',
+  ARRAY[
+    'CREATE INDEX idx_a ON test_table (a)',
+    'CREATE INDEX idx_b ON test_table (b)',
+    'CREATE INDEX idx_ab ON test_table (a, b)'
+  ]
+)
+----
+Query: SELECT * FROM test_table WHERE a = 1 AND b = 2
+
+Hypothetical Indexes:
+1: CREATE INDEX idx_a ON test_table (a)
+2: CREATE INDEX idx_b ON test_table (b)
+3: CREATE INDEX idx_ab ON test_table (a, b)
+
+In the next phase, this will be replaced with the actual EXPLAIN output.
+
+# Test with EXPLAIN options
+query T
+SELECT hypo_index_explain(
+  'SELECT * FROM test_table WHERE a = 1',
+  ARRAY['CREATE INDEX idx_a ON test_table (a)'],
+  'VERBOSE'
+)
+----
+Query: SELECT * FROM test_table WHERE a = 1
+
+Hypothetical Indexes:
+1: CREATE INDEX idx_a ON test_table (a)
+
+EXPLAIN options: VERBOSE
+
+In the next phase, this will be replaced with the actual EXPLAIN output.
+
+# Error cases
+
+# Invalid query
+statement error failed to parse query
+SELECT hypo_index_explain('SELECT * FROM', ARRAY['CREATE INDEX idx_a ON test_table (a)'])
+
+# Empty index array
+statement error at least one valid CREATE INDEX statement must be provided
+SELECT hypo_index_explain('SELECT * FROM test_table', ARRAY[]::STRING[])
+
+# Invalid index statement
+statement error failed to parse CREATE INDEX statement
+SELECT hypo_index_explain('SELECT * FROM test_table', ARRAY['CREATE INDX idx_a ON test_table (a)'])
+
+# Non-CREATE INDEX statement
+statement error statement at position 1 is not a CREATE INDEX statement
+SELECT hypo_index_explain('SELECT * FROM test_table', ARRAY['SELECT * FROM test_table'])
+
+# Multiple statements in the query
+statement error query must contain exactly one SQL statement
+SELECT hypo_index_explain('SELECT * FROM test_table; SELECT 1', ARRAY['CREATE INDEX idx_a ON test_table (a)']) 

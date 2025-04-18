@@ -1,0 +1,13 @@
+# Tests for hypo_index_explain function
+statement ok
+CREATE TABLE hypo_test_table (a INT, b INT, c INT)
+
+query T
+SELECT hypo_index_explain('SELECT * FROM hypo_test_table WHERE a = 1', ARRAY['CREATE INDEX idx_a ON hypo_test_table (a)'])
+----
+Query: SELECT * FROM hypo_test_table WHERE a = 1
+
+Hypothetical Indexes:
+1: CREATE INDEX idx_a ON hypo_test_table (a)
+
+In the next phase, this will be replaced with the actual EXPLAIN output. 
