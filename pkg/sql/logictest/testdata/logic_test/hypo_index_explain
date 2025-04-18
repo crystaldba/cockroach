@@ -1,44 +1,74 @@
-# Tests for hypo_index_explain function
+# Tests for the hypo_index_explain built-in function
 
 statement ok
-CREATE TABLE test_table (id INT PRIMARY KEY, name STRING, value INT)
+CREATE TABLE test_table (a INT, b INT, c INT)
 
-statement ok
-INSERT INTO test_table VALUES (1, 'a', 10), (2, 'b', 20), (3, 'c', 30)
-
-# Simple test that calls the function with a basic query and one index
+# Basic functionality with simple query and one index
 query T
-SELECT hypo_index_explain('SELECT * FROM test_table WHERE name = ''a''', ARRAY['CREATE INDEX idx_name ON test_table (name)'])
+SELECT hypo_index_explain('SELECT * FROM test_table WHERE a = 1', ARRAY['CREATE INDEX idx_a ON test_table (a)'])
 ----
-hypo_index_explain stub implementation - will be replaced with actual explain output
+Query: SELECT * FROM test_table WHERE a = 1
 
-# Test with multiple hypothetical indexes
+Hypothetical Indexes:
+1: CREATE INDEX idx_a ON test_table (a)
+
+In the next phase, this will be replaced with the actual EXPLAIN output.
+
+# Test with multiple indexes
 query T
 SELECT hypo_index_explain(
-  'SELECT * FROM test_table WHERE name = ''a'' AND value > 5',
+  'SELECT * FROM test_table WHERE a = 1 AND b = 2',
   ARRAY[
-    'CREATE INDEX idx_name ON test_table (name)',
-    'CREATE INDEX idx_value ON test_table (value)',
-    'CREATE INDEX idx_name_value ON test_table (name, value)'
+    'CREATE INDEX idx_a ON test_table (a)',
+    'CREATE INDEX idx_b ON test_table (b)',
+    'CREATE INDEX idx_ab ON test_table (a, b)'
   ]
 )
 ----
-hypo_index_explain stub implementation - will be replaced with actual explain output
+Query: SELECT * FROM test_table WHERE a = 1 AND b = 2
 
-# Test with options parameter
+Hypothetical Indexes:
+1: CREATE INDEX idx_a ON test_table (a)
+2: CREATE INDEX idx_b ON test_table (b)
+3: CREATE INDEX idx_ab ON test_table (a, b)
+
+In the next phase, this will be replaced with the actual EXPLAIN output.
+
+# Test with EXPLAIN options
 query T
 SELECT hypo_index_explain(
-  'SELECT * FROM test_table WHERE name = ''a''',
-  ARRAY['CREATE INDEX idx_name ON test_table (name)'],
+  'SELECT * FROM test_table WHERE a = 1',
+  ARRAY['CREATE INDEX idx_a ON test_table (a)'],
   'VERBOSE'
 )
 ----
-hypo_index_explain stub implementation - will be replaced with actual explain output
+Query: SELECT * FROM test_table WHERE a = 1
 
-# Test with not enough arguments
-statement error pq: hypo_index_explain requires at least a query and one hypothetical index
-SELECT hypo_index_explain('SELECT * FROM test_table WHERE name = ''a''')
+Hypothetical Indexes:
+1: CREATE INDEX idx_a ON test_table (a)
 
-# Test with NULL argument
-statement error pq: hypo_index_explain requires at least a query and one hypothetical index
-SELECT hypo_index_explain(NULL, ARRAY['CREATE INDEX idx_name ON test_table (name)']) 
+EXPLAIN options: VERBOSE
+
+In the next phase, this will be replaced with the actual EXPLAIN output.
+
+# Error cases
+
+# Invalid query
+statement error failed to parse query
+SELECT hypo_index_explain('SELECT * FROM', ARRAY['CREATE INDEX idx_a ON test_table (a)'])
+
+# Empty index array
+statement error at least one valid CREATE INDEX statement must be provided
+SELECT hypo_index_explain('SELECT * FROM test_table', ARRAY[]::STRING[])
+
+# Invalid index statement
+statement error failed to parse CREATE INDEX statement
+SELECT hypo_index_explain('SELECT * FROM test_table', ARRAY['CREATE INDX idx_a ON test_table (a)'])
+
+# Non-CREATE INDEX statement
+statement error statement at position 1 is not a CREATE INDEX statement
+SELECT hypo_index_explain('SELECT * FROM test_table', ARRAY['SELECT * FROM test_table'])
+
+# Multiple statements in the query
+statement error query must contain exactly one SQL statement
+SELECT hypo_index_explain('SELECT * FROM test_table; SELECT 1', ARRAY['CREATE INDEX idx_a ON test_table (a)']) 
