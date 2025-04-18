@@ -1,0 +1,44 @@
+# Tests for hypo_index_explain function
+
+statement ok
+CREATE TABLE test_table (id INT PRIMARY KEY, name STRING, value INT)
+
+statement ok
+INSERT INTO test_table VALUES (1, 'a', 10), (2, 'b', 20), (3, 'c', 30)
+
+# Simple test that calls the function with a basic query and one index
+query T
+SELECT hypo_index_explain('SELECT * FROM test_table WHERE name = ''a''', ARRAY['CREATE INDEX idx_name ON test_table (name)'])
+----
+hypo_index_explain stub implementation - will be replaced with actual explain output
+
+# Test with multiple hypothetical indexes
+query T
+SELECT hypo_index_explain(
+  'SELECT * FROM test_table WHERE name = ''a'' AND value > 5',
+  ARRAY[
+    'CREATE INDEX idx_name ON test_table (name)',
+    'CREATE INDEX idx_value ON test_table (value)',
+    'CREATE INDEX idx_name_value ON test_table (name, value)'
+  ]
+)
+----
+hypo_index_explain stub implementation - will be replaced with actual explain output
+
+# Test with options parameter
+query T
+SELECT hypo_index_explain(
+  'SELECT * FROM test_table WHERE name = ''a''',
+  ARRAY['CREATE INDEX idx_name ON test_table (name)'],
+  'VERBOSE'
+)
+----
+hypo_index_explain stub implementation - will be replaced with actual explain output
+
+# Test with not enough arguments
+statement error pq: hypo_index_explain requires at least a query and one hypothetical index
+SELECT hypo_index_explain('SELECT * FROM test_table WHERE name = ''a''')
+
+# Test with NULL argument
+statement error pq: hypo_index_explain requires at least a query and one hypothetical index
+SELECT hypo_index_explain(NULL, ARRAY['CREATE INDEX idx_name ON test_table (name)']) 

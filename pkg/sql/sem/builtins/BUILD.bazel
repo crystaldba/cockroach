@@ -13,6 +13,7 @@ go_library(
         "generator_builtins.go",
         "generator_probe_ranges.go",
         "geo_builtins.go",
+        "hypo_index.go",
         "math_builtins.go",
         "notice.go",
         "overlaps_builtins.go",
