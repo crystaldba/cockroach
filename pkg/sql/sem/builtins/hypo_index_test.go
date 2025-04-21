@@ -3,8 +3,13 @@
 
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the CockroachDB Software License
-// included in the /LICENSE file.
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package builtins
 
@@ -28,16 +33,24 @@ func TestHypoIndexExplain(t *testing.T) {
 	evalCtx := eval.MakeTestingEvalContext(st)
 
 	testCases := []struct {
-		name        string
-		query       string
-		indexes     []string
-		options     string
-		expectError bool
+		name              string
+		query             string
+		indexes           []string
+		options           string
+		expectError       bool
+		expectedMarkers   []string
+		unexpectedMarkers []string
 	}{
 		{
 			name:    "Simple query with one index",
 			query:   "SELECT * FROM test_table WHERE a = 1",
 			indexes: []string{"CREATE INDEX idx_a ON test_table (a)"},
+			expectedMarkers: []string{
+				"EXPLAIN with hypothetical indexes",
+				"CREATE INDEX ON test_table (a)",
+				"scan test_table",
+				"constraint: /a/=1",
+			},
 		},
 		{
 			name:  "Multiple indexes",
@@ -47,12 +60,27 @@ func TestHypoIndexExplain(t *testing.T) {
 				"CREATE INDEX idx_b ON test_table (b)",
 				"CREATE INDEX idx_ab ON test_table (a, b)",
 			},
+			expectedMarkers: []string{
+				"EXPLAIN with hypothetical indexes",
+				"CREATE INDEX ON test_table (a)",
+				"CREATE INDEX ON test_table (b)",
+				"CREATE INDEX ON test_table (a, b)",
+				"scan test_table",
+				"constraint: /a/=1/b/=2",
+			},
 		},
 		{
 			name:    "With EXPLAIN options",
 			query:   "SELECT * FROM test_table WHERE a = 1",
 			indexes: []string{"CREATE INDEX idx_a ON test_table (a)"},
 			options: "VERBOSE",
+			expectedMarkers: []string{
+				"EXPLAIN with hypothetical indexes",
+				"CREATE INDEX ON test_table (a)",
+				"scan test_table",
+				"constraint: /a/=1",
+				"columns: a:1(int) b:2(int) c:3(int)",
+			},
 		},
 		{
 			name:        "Invalid query",
@@ -84,7 +112,13 @@ func TestHypoIndexExplain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Build the args
 			args := make(tree.Datums, 0, 3)
-			args = append(args, tree.NewDString(tc.query))
+
+			// Add query
+			if tc.query == "" {
+				args = append(args, tree.DNull)
+			} else {
+				args = append(args, tree.NewDString(tc.query))
+			}
 
 			// Create the indexes array
 			indexesArray := tree.NewDArray(types.String)
@@ -96,6 +130,8 @@ func TestHypoIndexExplain(t *testing.T) {
 			// Add options if present
 			if tc.options != "" {
 				args = append(args, tree.NewDString(tc.options))
+			} else {
+				args = append(args, tree.DNull)
 			}
 
 			// Call the function
@@ -107,14 +143,15 @@ func TestHypoIndexExplain(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, result)
 
-				// Check that the result contains expected substrings
+				// Check that the result contains expected markers
 				resultStr := string(tree.MustBeDString(result))
-				require.Contains(t, resultStr, tc.query)
-				for _, idx := range tc.indexes {
-					require.Contains(t, resultStr, idx)
+				for _, marker := range tc.expectedMarkers {
+					require.Contains(t, resultStr, marker)
 				}
-				if tc.options != "" {
-					require.Contains(t, resultStr, tc.options)
+
+				// Check that the result does not contain unexpected markers
+				for _, marker := range tc.unexpectedMarkers {
+					require.NotContains(t, resultStr, marker)
 				}
 			}
 		})
@@ -126,14 +163,19 @@ func TestHypoIndexExplainErrors(t *testing.T) {
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := eval.MakeTestingEvalContext(st)
 
+	// Test null query
+	_, err := hypoIndexExplain(ctx, &evalCtx, tree.Datums{tree.DNull, tree.NewDArray(types.String), tree.DNull})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "query cannot be NULL")
+
 	// Test not enough arguments
-	_, err := hypoIndexExplain(ctx, &evalCtx, tree.Datums{tree.NewDString("SELECT 1")})
+	_, err = hypoIndexExplain(ctx, &evalCtx, tree.Datums{tree.NewDString("SELECT 1")})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "requires at least a query and one hypothetical index")
 
 	// Test empty index array
 	indexesArray := tree.NewDArray(types.String)
-	_, err = hypoIndexExplain(ctx, &evalCtx, tree.Datums{tree.NewDString("SELECT 1"), indexesArray})
+	_, err = hypoIndexExplain(ctx, &evalCtx, tree.Datums{tree.NewDString("SELECT 1"), indexesArray, tree.DNull})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "at least one valid CREATE INDEX statement must be provided")
 }

@@ -3,16 +3,19 @@
 statement ok
 CREATE TABLE test_table (a INT, b INT, c INT)
 
+statement ok
+INSERT INTO test_table VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300)
+
 # Basic functionality with simple query and one index
 query T
 SELECT hypo_index_explain('SELECT * FROM test_table WHERE a = 1', ARRAY['CREATE INDEX idx_a ON test_table (a)'])
 ----
-Query: SELECT * FROM test_table WHERE a = 1
+# EXPLAIN with hypothetical indexes:
+# Hypothetical indexes used:
+# 1: CREATE INDEX ON test_table (a)
 
-Hypothetical Indexes:
-1: CREATE INDEX idx_a ON test_table (a)
-
-In the next phase, this will be replaced with the actual EXPLAIN output.
+scan test_table
+ └── constraint: /a/=1
 
 # Test with multiple indexes
 query T
@@ -25,14 +28,14 @@ SELECT hypo_index_explain(
   ]
 )
 ----
-Query: SELECT * FROM test_table WHERE a = 1 AND b = 2
+# EXPLAIN with hypothetical indexes:
+# Hypothetical indexes used:
+# 1: CREATE INDEX ON test_table (a)
+# 2: CREATE INDEX ON test_table (b)
+# 3: CREATE INDEX ON test_table (a, b)
 
-Hypothetical Indexes:
-1: CREATE INDEX idx_a ON test_table (a)
-2: CREATE INDEX idx_b ON test_table (b)
-3: CREATE INDEX idx_ab ON test_table (a, b)
-
-In the next phase, this will be replaced with the actual EXPLAIN output.
+scan test_table
+ └── constraint: /a/=1/b/=2
 
 # Test with EXPLAIN options
 query T
@@ -42,14 +45,13 @@ SELECT hypo_index_explain(
   'VERBOSE'
 )
 ----
-Query: SELECT * FROM test_table WHERE a = 1
+# EXPLAIN with hypothetical indexes:
+# Hypothetical indexes used:
+# 1: CREATE INDEX ON test_table (a)
 
-Hypothetical Indexes:
-1: CREATE INDEX idx_a ON test_table (a)
-
-EXPLAIN options: VERBOSE
-
-In the next phase, this will be replaced with the actual EXPLAIN output.
+scan test_table
+ ├── columns: a:1(int) b:2(int) c:3(int)
+ └── constraint: /a/=1
 
 # Error cases
 
@@ -71,4 +73,12 @@ SELECT hypo_index_explain('SELECT * FROM test_table', ARRAY['SELECT * FROM test_
 
 # Multiple statements in the query
 statement error query must contain exactly one SQL statement
-SELECT hypo_index_explain('SELECT * FROM test_table; SELECT 1', ARRAY['CREATE INDEX idx_a ON test_table (a)']) 
+SELECT hypo_index_explain('SELECT * FROM test_table; SELECT 1', ARRAY['CREATE INDEX idx_a ON test_table (a)'])
+
+# Column doesn't exist
+statement error column "d" not found
+SELECT hypo_index_explain('SELECT * FROM test_table WHERE a = 1', ARRAY['CREATE INDEX idx_d ON test_table (d)'])
+
+# Table doesn't exist
+statement error failed to resolve table
+SELECT hypo_index_explain('SELECT * FROM test_table WHERE a = 1', ARRAY['CREATE INDEX idx_a ON nonexistent_table (a)']) 
