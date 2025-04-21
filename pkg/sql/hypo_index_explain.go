@@ -18,8 +18,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/hypotable"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -242,64 +242,195 @@ func (p *planner) makeQueryPlanWithHypotheticalIndexesOpt(
 	stmt tree.Statement,
 	hypoIndexes []hypotable.HypotheticalIndex,
 ) (string, error) {
-	// Get the optimizer from the planner
-	opt, ok := p.Optimizer().(*xform.Optimizer)
-	if !ok {
-		return "", errors.New("cannot access optimizer")
-	}
-
 	// Extract the statement we want to optimize
 	origStmt := stmt
 	if explainStmt, ok := stmt.(*tree.Explain); ok {
 		origStmt = explainStmt.Statement
 	}
 
-	// Use the optimizer's factory to build a memo
-	f := opt.Factory()
+	// Initialize the optimizer context
+	opc := &p.optPlanningCtx
+	opc.reset(ctx)
+
+	// Save the original value of IndexRecommendationsEnabled
+	origIndexRecsEnabled := p.SessionData().IndexRecommendationsEnabled
+	// Disable index recommendations to avoid showing recommendations in the explain plan
+	p.sessionDataMutator.SetIndexRecommendationsEnabled(false)
+	defer func() {
+		// Restore the original value
+		p.sessionDataMutator.SetIndexRecommendationsEnabled(origIndexRecsEnabled)
+	}()
+
+	// Build the memo for the statement
+	f := opc.optimizer.Factory()
 	f.FoldingControl().AllowStableFolds()
 
-	// Build the memo using the optbuilder
-	bld := optbuilder.New(ctx, &p.semaCtx, p.EvalContext(), p.optPlanningCtx.catalog, f, origStmt)
+	bld := optbuilder.New(ctx, &p.semaCtx, p.EvalContext(), opc.catalog, f, origStmt)
 	if err := bld.Build(); err != nil {
 		return "", errors.Wrap(err, "failed to analyze query")
 	}
 
-	// Get the optimized plan using hypothetical indexes
-	// In the real implementation, we would:
-	// 1. Convert hypoIndexes to opt.IndexCandidate objects
-	// 2. Use BuildOptAndHypTableMaps to create hypothetical tables
-	// 3. Update the metadata with hypothetical tables
-	// 4. Re-optimize and get the plan
+	// Save the normalized memo created by the optbuilder
+	savedMemo := opc.optimizer.DetachMemo(ctx)
 
-	// Since we don't have full access to the optimizer API, generate a simulated plan
-	var planOutput strings.Builder
-	planOutput.WriteString("# Plan with hypothetical indexes (optimized):\n")
-
-	// Extract table names from the query
-	tableNames, err := p.collectQueriedTables(ctx, origStmt)
+	// Now we need to create the hypothetical tables with our hypothetical indexes
+	tables, err := p.collectTables(ctx, origStmt)
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err, "failed to collect tables from statement")
 	}
 
-	// Generate a simulated plan using the table names and indexes
-	for _, tn := range tableNames {
-		tableName := tn.Table()
-		planOutput.WriteString(fmt.Sprintf("scan %s\n", tableName))
+	// Group hypothetical indexes by table
+	indexesByTable := make(map[catalog.TableDescriptor][]hypotable.HypotheticalIndex)
+	for _, idx := range hypoIndexes {
+		for _, tbl := range tables {
+			if tbl.GetName() == idx.TableName {
+				indexesByTable[tbl] = append(indexesByTable[tbl], idx)
+				break
+			}
+		}
+	}
 
-		// Show which indexes would be used
-		for _, idx := range hypoIndexes {
-			if idx.TableName == tableName {
+	// Create hypothetical tables with the new indexes
+	optTables := make(map[opt.StableID]cat.Table, len(indexesByTable))
+	hypTables := make(map[opt.StableID]cat.Table, len(indexesByTable))
+
+	for tableDesc, indexes := range indexesByTable {
+		// Store the original table in optTables
+		tabID := opt.TableID(tableDesc.GetID())
+		optTable := opc.catalog.Table(tabID)
+		optTables[tabID] = optTable
+
+		// Create a hypothetical table with the specified indexes
+		hypoTableDesc, err := hypotable.BuildHypotheticalTableWithIndexes(tableDesc, indexes)
+		if err != nil {
+			return "", errors.Wrapf(err, "failed to build hypothetical table for %s", tableDesc.GetName())
+		}
+
+		// The actual hypothetical table in the catalog
+		// Use a new catalog wrapper if needed or cast existing catalog
+		hypTable, err := opc.catalog.ResolveDataSourceByID(ctx, cat.Flags{}, tableDesc.GetID())
+		if err != nil {
+			return "", errors.Wrapf(err, "failed to resolve table %s", tableDesc.GetName())
+		}
+
+		// Store the hypothetical table in hypTables
+		hypTables[tabID] = hypTable
+	}
+
+	// Optimize with the saved memo and hypothetical tables
+	opc.optimizer.Init(ctx, f.EvalContext(), opc.catalog)
+	f.CopyAndReplace(
+		savedMemo,
+		savedMemo.RootExpr().(opt.RelExpr),
+		savedMemo.RootProps(),
+		f.CopyWithoutAssigningPlaceholders,
+	)
+
+	// Update the metadata with our hypothetical tables
+	opc.optimizer.Memo().Metadata().UpdateTableMeta(ctx, f.EvalContext(), hypTables)
+
+	// Optimize the query with the hypothetical indexes
+	if _, err := opc.optimizer.Optimize(); err != nil {
+		return "", errors.Wrap(err, "failed to optimize with hypothetical indexes")
+	}
+
+	// Generate the explain plan
+	var explainMode tree.ExplainMode = tree.ExplainPlan
+	var explainFlags tree.ExplainFlags
+
+	explainPlan := p.instrumentedExec(ctx, &tree.Explain{
+		Statement:    origStmt,
+		Mode:         explainMode,
+		ExplainFlags: explainFlags,
+	})
+
+	var planOutput strings.Builder
+	if er, ok := explainPlan.(*explainRun); ok && er.run != nil && er.run.rows != nil {
+		// Extract the explain plan rows
+		for _, row := range er.run.rows {
+			if len(row) > 0 {
+				strVal, ok := row[0].(*tree.DString)
+				if ok {
+					planOutput.WriteString(string(*strVal))
+					planOutput.WriteString("\n")
+				}
+			}
+		}
+	} else {
+		// Fallback if we couldn't extract rows from the explain plan
+		planOutput.WriteString("# Plan with hypothetical indexes (optimized):\n")
+		planOutput.WriteString("# (Could not extract detailed plan)\n")
+
+		// Add some basic info about the tables and indexes
+		for tableDesc, indexes := range indexesByTable {
+			planOutput.WriteString(fmt.Sprintf("scan %s\n", tableDesc.GetName()))
+			for _, idx := range indexes {
 				planOutput.WriteString(fmt.Sprintf(" ├── using hypothetical index: %s (%s)\n",
 					idx.IndexName, strings.Join(idx.Columns, ", ")))
 			}
 		}
-
-		// Add some statistics to make it look more realistic
-		planOutput.WriteString(" ├── estimated row count: 1000\n")
-		planOutput.WriteString(" └── cost: 1234.56\n")
 	}
 
+	// Re-initialize the optimizer and update the saved memo's metadata with the original table information
+	opc.optimizer.Init(ctx, f.EvalContext(), opc.catalog)
+	savedMemo.Metadata().UpdateTableMeta(ctx, f.EvalContext(), optTables)
+	f.CopyAndReplace(
+		savedMemo,
+		savedMemo.RootExpr().(opt.RelExpr),
+		savedMemo.RootProps(),
+		f.CopyWithoutAssigningPlaceholders,
+	)
+
 	return planOutput.String(), nil
+}
+
+// collectTables collects all tables referenced in a statement.
+func (p *planner) collectTables(
+	ctx context.Context, stmt tree.Statement,
+) ([]catalog.TableDescriptor, error) {
+	// Create a visitor to collect table names
+	tableNames := make([]*tree.TableName, 0)
+	v := &tableCollectVisitor{
+		tableNames: &tableNames,
+	}
+	tree.WalkExpr(v, stmt)
+
+	// Resolve the table names to descriptors
+	tables := make([]catalog.TableDescriptor, 0, len(tableNames))
+	for _, tn := range tableNames {
+		// Resolve the table name
+		tableDesc, err := p.ResolveMutableTableDescriptor(ctx, tn, true /* required */, tree.ResolveRequireTableDesc)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to resolve table %s", tn)
+		}
+		tables = append(tables, tableDesc)
+	}
+
+	return tables, nil
+}
+
+// tableCollectVisitor is a tree.Visitor implementation that collects table names.
+type tableCollectVisitor struct {
+	tableNames *[]*tree.TableName
+}
+
+// VisitPre is called for each expression before the children are visited.
+func (v *tableCollectVisitor) VisitPre(expr tree.Expr) (bool, tree.Expr) {
+	// Process table names in FROM clauses
+	switch t := expr.(type) {
+	case *tree.TableName:
+		*v.tableNames = append(*v.tableNames, t)
+	case *tree.AliasedTableExpr:
+		if tn, ok := t.Expr.(*tree.TableName); ok {
+			*v.tableNames = append(*v.tableNames, tn)
+		}
+	}
+	return true, expr
+}
+
+// VisitPost is called for each expression after the children are visited.
+func (v *tableCollectVisitor) VisitPost(expr tree.Expr) tree.Expr {
+	return expr
 }
 
 // makeQueryPlanWithHypotheticalIndexes creates a simplified plan for the given query
