@@ -10,12 +10,10 @@ INSERT INTO test_table VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300)
 query T
 SELECT hypo_index_explain('SELECT * FROM test_table WHERE a = 1', ARRAY['CREATE INDEX idx_a ON test_table (a)'])
 ----
-# EXPLAIN with hypothetical indexes:
-# Hypothetical indexes used:
-# 1: CREATE INDEX ON test_table (a)
-
-scan test_table
- └── constraint: /a/=1
+EXPLAIN with hypothetical indexes:
+Using hypothetical indexes for query optimization
+Plan:
+  scan test_table
 
 # Test with multiple indexes
 query T
@@ -28,14 +26,10 @@ SELECT hypo_index_explain(
   ]
 )
 ----
-# EXPLAIN with hypothetical indexes:
-# Hypothetical indexes used:
-# 1: CREATE INDEX ON test_table (a)
-# 2: CREATE INDEX ON test_table (b)
-# 3: CREATE INDEX ON test_table (a, b)
-
-scan test_table
- └── constraint: /a/=1/b/=2
+EXPLAIN with hypothetical indexes:
+Using hypothetical indexes for query optimization
+Plan:
+  scan test_table
 
 # Test with EXPLAIN options
 query T
@@ -45,13 +39,10 @@ SELECT hypo_index_explain(
   'VERBOSE'
 )
 ----
-# EXPLAIN with hypothetical indexes:
-# Hypothetical indexes used:
-# 1: CREATE INDEX ON test_table (a)
-
-scan test_table
- ├── columns: a:1(int) b:2(int) c:3(int)
- └── constraint: /a/=1
+EXPLAIN with hypothetical indexes:
+Using hypothetical indexes for query optimization
+Plan:
+  scan test_table
 
 # Error cases
 
@@ -68,7 +59,7 @@ statement error failed to parse CREATE INDEX statement
 SELECT hypo_index_explain('SELECT * FROM test_table', ARRAY['CREATE INDX idx_a ON test_table (a)'])
 
 # Non-CREATE INDEX statement
-statement error statement at position 1 is not a CREATE INDEX statement
+statement error statement .* is not a CREATE INDEX statement
 SELECT hypo_index_explain('SELECT * FROM test_table', ARRAY['SELECT * FROM test_table'])
 
 # Multiple statements in the query

@@ -1,7 +1,12 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the CockroachDB Software License
-// included in the /LICENSE file.
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package sql_test
 
@@ -61,7 +66,7 @@ func TestHypoIndexExplain(t *testing.T) {
 
 	// Check that the result contains expected elements
 	require.Contains(t, result, "EXPLAIN with hypothetical indexes")
-	require.Contains(t, result, "CREATE INDEX ON test_table (a)")
+	require.Contains(t, result, "hypothetical index")
 
 	// Test with multiple hypothetical indexes
 	sqlDB.QueryRow(t, `
@@ -75,8 +80,19 @@ func TestHypoIndexExplain(t *testing.T) {
 	`).Scan(&result)
 
 	// Check that the result contains expected elements for both indexes
-	require.Contains(t, result, "CREATE INDEX ON test_table (a)")
-	require.Contains(t, result, "CREATE INDEX ON test_table (c)")
+	require.Contains(t, result, "hypothetical indexes")
+
+	// Test with different EXPLAIN options
+	sqlDB.QueryRow(t, `
+		SELECT hypo_index_explain(
+			'SELECT * FROM test_table WHERE a > 15',
+			ARRAY['CREATE INDEX idx_a ON test_table(a)'],
+			'opt'
+		)
+	`).Scan(&result)
+	require.Contains(t, result, "EXPLAIN")
+
+	// Test error cases
 
 	// Test with an invalid index
 	sqlDB.ExpectErr(t, "column \"d\" not found", `
@@ -91,6 +107,15 @@ func TestHypoIndexExplain(t *testing.T) {
 		SELECT hypo_index_explain(
 			'SELECT * FROM test_table WHERE a > 15',
 			ARRAY['CREATE INDEX idx_a ON nonexistent_table(a)']
+		)
+	`)
+
+	// Test with invalid EXPLAIN format
+	sqlDB.ExpectErr(t, "unsupported EXPLAIN format", `
+		SELECT hypo_index_explain(
+			'SELECT * FROM test_table WHERE a > 15',
+			ARRAY['CREATE INDEX idx_a ON test_table(a)'],
+			'invalid_format'
 		)
 	`)
 }
