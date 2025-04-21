@@ -356,6 +356,13 @@ func TestReadCommittedLogic_builtin_function_notenant(
 	runLogicTest(t, "builtin_function_notenant")
 }
 
+func TestReadCommittedLogic_builtins(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "builtins")
+}
+
 func TestReadCommittedLogic_bytes(
 	t *testing.T,
 ) {
@@ -1012,6 +1019,13 @@ func TestReadCommittedLogic_hidden_columns(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "hidden_columns")
+}
+
+func TestReadCommittedLogic_hypo_index_explain(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "hypo_index_explain")
 }
 
 func TestReadCommittedLogic_impure(

@@ -351,6 +351,13 @@ func TestTenantLogic_builtin_function(
 	runLogicTest(t, "builtin_function")
 }
 
+func TestTenantLogic_builtins(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "builtins")
+}
+
 func TestTenantLogic_bytes(
 	t *testing.T,
 ) {
@@ -1007,6 +1014,13 @@ func TestTenantLogic_hidden_columns(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "hidden_columns")
+}
+
+func TestTenantLogic_hypo_index_explain(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "hypo_index_explain")
 }
 
 func TestTenantLogic_impure(

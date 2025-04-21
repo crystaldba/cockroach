@@ -304,6 +304,13 @@ func TestLogic_builtin_function_notenant(
 	runLogicTest(t, "builtin_function_notenant")
 }
 
+func TestLogic_builtins(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "builtins")
+}
+
 func TestLogic_bytes(
 	t *testing.T,
 ) {
@@ -960,6 +967,13 @@ func TestLogic_hidden_columns(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "hidden_columns")
+}
+
+func TestLogic_hypo_index_explain(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "hypo_index_explain")
 }
 
 func TestLogic_impure(

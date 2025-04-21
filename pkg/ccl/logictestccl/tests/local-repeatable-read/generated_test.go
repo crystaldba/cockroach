@@ -356,6 +356,13 @@ func TestRepeatableReadLogic_builtin_function_notenant(
 	runLogicTest(t, "builtin_function_notenant")
 }
 
+func TestRepeatableReadLogic_builtins(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "builtins")
+}
+
 func TestRepeatableReadLogic_bytes(
 	t *testing.T,
 ) {
@@ -1005,6 +1012,13 @@ func TestRepeatableReadLogic_hidden_columns(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "hidden_columns")
+}
+
+func TestRepeatableReadLogic_hypo_index_explain(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "hypo_index_explain")
 }
 
 func TestRepeatableReadLogic_impure(
