@@ -18,6 +18,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/hypotable"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/indexrec"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -233,8 +241,7 @@ func explainModeFromString(format string) (tree.ExplainMode, error) {
 // makeQueryPlanWithHypotheticalIndexesOpt is a function that follows the pattern of
 // makeQueryIndexRecommendation but uses input hypothetical indexes instead of finding them.
 //
-// This function creates an optimized query plan with hypothetical indexes. Currently,
-// it delegates to the simpler implementation but adds more detailed index information.
+// This function creates an optimized query plan with hypothetical indexes.
 func (p *planner) makeQueryPlanWithHypotheticalIndexesOpt(
 	ctx context.Context,
 	stmt tree.Statement,
@@ -255,43 +262,198 @@ func (p *planner) makeQueryPlanWithHypotheticalIndexesOpt(
 		p.SessionData().IndexRecommendationsEnabled = origIndexRecsEnabled
 	}()
 
-	// Create a plan using the simpler implementation
-	basePlan, err := p.makeQueryPlanWithHypotheticalIndexes(ctx, origStmt, hypoIndexes)
-	if err != nil {
+	// Create an optimizer planning context
+	opc := &optPlanningCtx{}
+	opc.init(p)
+	opc.reset(ctx)
+
+	// Build the memo for the input query
+	f := opc.optimizer.Factory()
+	bld := optbuilder.New(ctx, &p.semaCtx, p.EvalContext(), opc.catalog, f, origStmt)
+	if err := bld.Build(); err != nil {
+		return "", errors.Wrapf(err, "failed to build query plan")
+	}
+
+	// Save the normalized memo created by the optbuilder
+	savedMemo := opc.optimizer.DetachMemo(ctx)
+
+	// Fully optimize the memo first to ensure we have the sort expression in place
+	// (needed for certain index candidates)
+	f = opc.optimizer.Factory()
+	f.FoldingControl().AllowStableFolds()
+	f.CopyAndReplace(
+		savedMemo,
+		savedMemo.RootExpr().(memo.RelExpr),
+		savedMemo.RootProps(),
+		f.CopyWithoutAssigningPlaceholders,
+	)
+	opc.optimizer.NotifyOnMatchedRule(func(ruleName opt.RuleName) bool {
+		return ruleName.IsNormalize()
+	})
+	if _, err := opc.optimizer.Optimize(); err != nil {
 		return "", err
 	}
 
-	// Add more detailed information about the hypothetical indexes
-	var result strings.Builder
-	result.WriteString("# Plan with hypothetical indexes (optimized):\n")
-	result.WriteString("# Note: In a full implementation, this would use the optimizer\n")
-	result.WriteString("# to create a real execution plan with the hypothetical indexes.\n\n")
-	result.WriteString(basePlan)
+	// Create a map of hypothetical indexes by table
+	indexCandidateSet := make(map[cat.Table][][]cat.IndexColumn)
+	tablesProcessed := make(map[string]cat.Table)
 
-	result.WriteString("\n# Hypothetical index details:\n")
-	for i, idx := range hypoIndexes {
-		result.WriteString(fmt.Sprintf("# Index %d: %s on %s\n", i+1, idx.IndexName, idx.TableName))
-		result.WriteString(fmt.Sprintf("#  Columns: %s\n", strings.Join(idx.Columns, ", ")))
-
-		if len(idx.StoringColumns) > 0 {
-			result.WriteString(fmt.Sprintf("#  Storing: %s\n", strings.Join(idx.StoringColumns, ", ")))
+	// Process tables and collect index candidates
+	md := f.Memo().Metadata()
+	for _, tabMeta := range md.AllTables() {
+		if tabMeta.Table.IsVirtualTable() || tabMeta.Table.IsSystemTable() {
+			continue
 		}
 
-		if idx.IsUnique {
-			result.WriteString("#  Unique: true\n")
+		// Check if we have hypothetical indexes for this table
+		tableName := string(tabMeta.Table.Name())
+		tableIndexes := make([][]cat.IndexColumn, 0)
+
+		for _, hypoIdx := range hypoIndexes {
+			if hypoIdx.TableName == tableName {
+				// Create index columns
+				indexCols := make([]cat.IndexColumn, 0, len(hypoIdx.Columns))
+				for i, colName := range hypoIdx.Columns {
+					// Find the column in the table
+					var colFound bool
+					for colOrd := 0; colOrd < tabMeta.Table.ColumnCount(); colOrd++ {
+						col := tabMeta.Table.Column(colOrd)
+						if string(col.ColName()) == colName {
+							descending := false
+							if i < len(hypoIdx.DirectionsBackward) {
+								descending = hypoIdx.DirectionsBackward[i]
+							}
+							indexCols = append(indexCols, cat.IndexColumn{
+								Column:     col,
+								Descending: descending,
+							})
+							colFound = true
+							break
+						}
+					}
+					if !colFound {
+						return "", errors.Newf("column %q not found in table %q", colName, tableName)
+					}
+				}
+				if len(indexCols) > 0 {
+					tableIndexes = append(tableIndexes, indexCols)
+				}
+			}
 		}
 
-		result.WriteString("#\n")
+		if len(tableIndexes) > 0 {
+			indexCandidateSet[tabMeta.Table] = tableIndexes
+			tablesProcessed[tableName] = tabMeta.Table
+		}
 	}
 
-	result.WriteString("\n# TO IMPLEMENT FULL VERSION:\n")
-	result.WriteString("# 1. Save normalized memo with optimizer.DetachMemo()\n")
-	result.WriteString("# 2. Build index candidates from hypothetical indexes\n")
-	result.WriteString("# 3. Create hypothetical tables with BuildOptAndHypTableMaps\n")
-	result.WriteString("# 4. Update metadata with hypothetical tables\n")
-	result.WriteString("# 5. Optimize query with these tables\n")
-	result.WriteString("# 6. Generate EXPLAIN output from optimized plan\n")
-	result.WriteString("# 7. Restore original memo state\n")
+	// If no relevant tables found, return early
+	if len(indexCandidateSet) == 0 {
+		return "No relevant tables found for the hypothetical indexes.", nil
+	}
+
+	// Build hypothetical tables with the provided indexes
+	optTables, hypTables := indexrec.BuildOptAndHypTableMaps(opc.catalog, indexCandidateSet)
+
+	// Optimize with the saved memo and hypothetical tables
+	opc.optimizer.Init(ctx, f.EvalContext(), opc.catalog)
+	f = opc.optimizer.Factory()
+	f.CopyAndReplace(
+		savedMemo,
+		savedMemo.RootExpr().(memo.RelExpr),
+		savedMemo.RootProps(),
+		f.CopyWithoutAssigningPlaceholders,
+	)
+	f.Memo().Metadata().UpdateTableMeta(ctx, f.EvalContext(), hypTables)
+	if _, err := opc.optimizer.Optimize(); err != nil {
+		return "", err
+	}
+
+	// Create an explain statement using the optimized plan
+	explainFactory := explain.NewFactory(newExecFactory(ctx, p), &p.semaCtx, p.EvalContext())
+	execBld := execbuilder.New(
+		ctx, explainFactory, &opc.optimizer, f.Memo(), opc.catalog, f.Memo().RootExpr(),
+		&p.semaCtx, p.EvalContext(), false /* allowAutoCommit */, false, /* ignoreTelemetry */
+	)
+	plan, err := execBld.Build()
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to build explain plan with hypothetical indexes")
+	}
+	explainPlan := plan.(*explain.Plan)
+
+	// Format the final output with hypothetical index information
+	var result strings.Builder
+	result.WriteString("EXPLAIN with hypothetical indexes:\n\n")
+
+	// List the hypothetical indexes that would be used
+	result.WriteString("# Hypothetical indexes used:\n")
+	for i, idx := range hypoIndexes {
+		result.WriteString(fmt.Sprintf("# %d: CREATE INDEX ON %s (", i+1, idx.TableName))
+
+		// List the index columns with their directions
+		for j, col := range idx.Columns {
+			if j > 0 {
+				result.WriteString(", ")
+			}
+			result.WriteString(col)
+			if j < len(idx.DirectionsBackward) && idx.DirectionsBackward[j] {
+				result.WriteString(" DESC")
+			}
+		}
+		result.WriteString(")")
+
+		// Add STORING columns if any
+		if len(idx.StoringColumns) > 0 {
+			result.WriteString(" STORING (")
+			for j, col := range idx.StoringColumns {
+				if j > 0 {
+					result.WriteString(", ")
+				}
+				result.WriteString(col)
+			}
+			result.WriteString(")")
+		}
+
+		// Add UNIQUE if applicable
+		if idx.IsUnique {
+			result.WriteString(" UNIQUE")
+		}
+
+		result.WriteString("\n")
+	}
+
+	result.WriteString("\n")
+
+	// Add the explain plan
+	result.WriteString("\n")
+
+	// Use Emit to generate the explain output
+	flags := explain.Flags{Verbose: true}
+	ob := explain.NewOutputBuilder(flags)
+	err = explain.Emit(
+		ctx,
+		p.EvalContext(),
+		explainPlan,
+		ob,
+		func(table cat.Table, index cat.Index, scanParams exec.ScanParams) string {
+			return ""
+		},
+		false, /* createPostQueryPlanIfMissing */
+	)
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to emit explain plan")
+	}
+
+	// Add the rows from the output builder
+	rows := ob.BuildStringRows()
+	for _, row := range rows {
+		result.WriteString(row + "\n")
+	}
+
+	// Re-initialize the optimizer (which also re-initializes the factory) and
+	// update the saved memo's metadata with the original table information
+	opc.optimizer.Init(ctx, f.EvalContext(), opc.catalog)
+	savedMemo.Metadata().UpdateTableMeta(ctx, f.EvalContext(), optTables)
 
 	return result.String(), nil
 }
