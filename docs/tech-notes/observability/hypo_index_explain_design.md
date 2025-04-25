@@ -41,22 +41,19 @@ Where:
 
 The implementation is being carried out in phases:
 
-### Phase 1: Function Definition and Registration (Completed)
+### Phase 1: Function Definition and Basic Implementation
 - Define and register the `hypo_index_explain` function in the SQL builtin catalog
 - Create a stub implementation that returns a constant string
+- Add comprehensive error handling for invalid input parameters
+- Set up basic testing infrastructure
 
-### Phase 2: Input Parsing and Validation (Completed)
-- Validate and parse the input SQL query
-- Parse and validate each CREATE INDEX statement
-- Validate the optional EXPLAIN options
-- Return a formatted string with the parsed information
+### Phase 2: Integration with Optimizer
+- Integrate with the optimizer by calling `makeQueryIndexRecommendation` (in `plan_opt.go`)
+- Convert the input CREATE INDEX statements into hypothetical indexes
+- Generate the EXPLAIN output for the query with these hypothetical indexes
+- Format and return the results
 
-### Phase 3: Integration with Optimizer (Next Step)
-- Create hypothetical index objects from the validated CREATE INDEX statements
-- Integrate with the optimizer to generate an execution plan that uses the hypothetical indexes
-- Generate the EXPLAIN output
-
-### Phase 4: Additional Features and Polishing
+### Phase 3: Additional Features and Polishing
 - Add support for various EXPLAIN options
 - Improve output formatting
 - Add additional error handling
@@ -64,123 +61,54 @@ The implementation is being carried out in phases:
 
 ## Detailed Implementation Steps
 
-### Step 1: Function Registration (Completed)
-- Created a new file `pkg/sql/sem/builtins/hypo_index.go`
-- Implemented `hypoIndexExplain` function
-- Registered the function in `pkg/sql/sem/builtins/builtins.go`
+### Step 1: Function Definition and Basic Implementation (Phase 1)
+- Create a new file `pkg/sql/sem/builtins/hypo_index.go`
+- Implement `hypoIndexExplain` function that accepts a SQL query and array of CREATE INDEX statements
+- Register the function in `pkg/sql/sem/builtins/builtins.go`
+- Add basic validation for input parameters
+- Return a constant string indicating a successful call with the provided parameters
+- Create test files and add basic tests for the function
 
-### Step 2: Input Parsing and Validation (Completed)
-- Added validation for all input parameters
-- Implemented parsing of SQL query using `parser.Parse`
-- Implemented parsing and validation of each CREATE INDEX statement
-- Added comprehensive error handling for various edge cases including:
-  - Invalid SQL query
-  - Invalid or non-CREATE INDEX statements
-  - Empty index array
-  - Multiple statements in a single query or index definition
+### Step 2: Integration with Optimizer (Phase 2)
+For this phase, we will:
 
-### Step 3: Integration with Optimizer (Next Step)
-For this phase, we need to:
-
-1. Create hypothetical indexes from the parsed statements:
-```go
-// Build hypothetical indexes from parsed CREATE INDEX statements
-func buildHypotheticalIndexes(
-    ctx context.Context,
-    evalCtx *eval.Context, 
-    parsedIndexes []createIndexStmt,
-) (map[catalog.TableDescriptor][]indexrec.IndexCandidate, error) {
-    // Convert each parsed CREATE INDEX statement into an indexrec.IndexCandidate
-    // This will require:
-    // 1. Resolving the target table
-    // 2. Creating column information for index columns and STORING columns
-    // 3. Setting up index properties (uniqueness, invisibility, etc.)
-}
-```
-
-2. Use the optimizer with hypothetical indexes:
-```go
-// Generate EXPLAIN plan with hypothetical indexes
-func generateExplainWithHypotheticalIndexes(
-    ctx context.Context,
-    p *planner,
-    stmt tree.Statement, 
-    indexes map[catalog.TableDescriptor][]indexrec.IndexCandidate,
-    explainOptions string,
-) (string, error) {
-    // Create an optimizer context
-    var opc optPlanningCtx
-    opc.init(ctx, p)
-    
-    // Using similar approach to makeQueryIndexRecommendation:
-    // 1. Save the normalized memo
-    // 2. Create hypothetical tables with our indexes
-    // 3. Optimize the query with these hypothetical tables
-    // 4. Generate EXPLAIN output
-    // 5. Ensure index recommendations are disabled during optimization
-}
-```
-
-3. Update the main function to use these components:
-```go
-func hypoIndexExplain(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
-    // Initial validation and parsing (completed)
-    
-    // Build hypothetical indexes
-    hypIndexes, err := buildHypotheticalIndexes(ctx, evalCtx, parsedIndexes)
-    if err != nil {
-        return nil, err
-    }
-    
-    // Generate EXPLAIN plan
-    explainOutput, err := generateExplainWithHypotheticalIndexes(
-        ctx, evalCtx.Planner, parsedQuery, hypIndexes, explainOptions)
-    if err != nil {
-        return nil, err
-    }
-    
-    return tree.NewDString(explainOutput), nil
-}
-```
-
-The core challenge in this phase will be correctly adapting the code from `makeQueryIndexRecommendation` in `pkg/sql/plan_opt.go` to work with our custom hypothetical indexes rather than using automatically generated index candidates.
-
-We need to:
 1. Create a new `pkg/sql/hypo_index_explain.go` file to implement the planner-level logic
 2. Create a new planner method `HypoIndexExplainBuiltin` that will be called from our builtin function
-3. Use the optimizer machinery to create and use hypothetical tables/indexes
+3. Adapt the logic from `makeQueryIndexRecommendation` in `pkg/sql/plan_opt.go` to work with our custom hypothetical indexes
+4. Use the existing `indexrec.BuildOptAndHypTableMaps` infrastructure to create hypothetical tables with the indexes
+5. Generate the EXPLAIN output for the query with these hypothetical indexes
 
-The method will be similar to:
+The implementation will look like:
 ```go
+// In pkg/sql/hypo_index_explain.go
 func (p *planner) HypoIndexExplainBuiltin(
     ctx context.Context, 
     indexes tree.Datum,
     query tree.Datum,
     options tree.Datum,
 ) (tree.Datum, error) {
-    // Implementation similar to makeQueryIndexRecommendation
-    // but adapted for our specific use case
+    // Parse the input query
+    // Parse the CREATE INDEX statements
+    // Convert CREATE INDEX statements to hypothetical indexes
+    // Call makeQueryIndexRecommendation-like logic with these hypothetical indexes
+    // Generate EXPLAIN output
+    // Return the formatted result
+}
+
+// In pkg/sql/sem/builtins/hypo_index.go
+func hypoIndexExplain(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
+    // Basic parameter validation
+    // Call p.HypoIndexExplainBuiltin with the validated parameters
+    // Return the result
 }
 ```
 
-### Step 4: Testing Strategy
-Our implementation includes multiple types of tests:
-
-1. **Unit Tests**:
-   - Created test file `pkg/sql/sem/builtins/hypo_index_test.go`
-   - Added tests for parameter validation
-   - Added tests for error cases
-   - Need to add tests for the actual optimizer integration
-
-2. **Logic Tests**:
-   - Created test file `pkg/sql/logictest/testdata/logic_test/hypo_index_explain`
-   - Added tests for basic functionality
-   - Added tests for multiple indexes
-   - Added tests for error cases
-   - Need to update these with actual EXPLAIN output once Phase 3 is complete
-
-3. **Manual Verification**:
-   - Created `pkg/sql/hypo_index_explain_manual_test.go` for manual verification
+### Step 3: Additional Features and Testing (Phase 3)
+- Improve the output formatting to match PostgreSQL's EXPLAIN output style
+- Add support for various EXPLAIN options (VERBOSE, TYPES, etc.)
+- Add comprehensive error handling for edge cases
+- Optimize performance for large queries or multiple indexes
+- Expand test coverage with more complex scenarios
 
 ## Limitations and Future Enhancements
 1. Initial implementation might not support all index types or options
