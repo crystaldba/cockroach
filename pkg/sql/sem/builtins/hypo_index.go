@@ -8,6 +8,7 @@ package builtins
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -58,8 +59,8 @@ Example: SELECT hypo_index_explain('SELECT * FROM t WHERE a > 10', ARRAY['CREATE
 )
 
 // hypoIndexExplain implements the builtin for hypo_index_explain.
-// In this initial implementation, it simply returns a constant string
-// with the provided query and indexes.
+// In Phase 2, it calls the planner's HypoIndexExplainBuiltin method if available,
+// otherwise falls back to the Phase 1 implementation that returns a constant string.
 func hypoIndexExplain(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
 	query := string(tree.MustBeDString(args[0]))
 	if query == "" {
@@ -106,7 +107,37 @@ func hypoIndexExplain(ctx context.Context, evalCtx *eval.Context, args tree.Datu
 		options = string(tree.MustBeDString(args[2]))
 	}
 
-	// For Phase 1, we just return a constant string
+	// Try to use the planner method if available
+	planner, hasPlannerMethod := evalCtx.Planner.(interface {
+		HypoIndexExplainBuiltin(ctx context.Context, indexDefs string, query string, explainOpts string) (string, error)
+	})
+
+	if hasPlannerMethod {
+		// Join all index statements into a single string for parsing
+		var indexDefsBuilder strings.Builder
+		for i, idx := range indexes {
+			if i > 0 {
+				indexDefsBuilder.WriteString(" ")
+			}
+
+			// Add semicolon if needed
+			if !strings.HasSuffix(strings.TrimSpace(idx), ";") {
+				indexDefsBuilder.WriteString(idx + ";")
+			} else {
+				indexDefsBuilder.WriteString(idx)
+			}
+		}
+
+		// Call the planner implementation (Phase 2)
+		result, err := planner.HypoIndexExplainBuiltin(ctx, indexDefsBuilder.String(), query, options)
+		if err != nil {
+			return nil, err
+		}
+
+		return tree.NewDString(result), nil
+	}
+
+	// Fallback to Phase 1 implementation
 	result := fmt.Sprintf(
 		"Hypothetical EXPLAIN plan (Phase 1 - constant string):\n"+
 			"Query: %s\n"+
