@@ -2653,6 +2653,8 @@ var builtinOidsArray = []string{
 	2690: `jsonb_path_exists(target: jsonb, path: jsonpath, vars: jsonb) -> bool`,
 	2691: `jsonb_path_exists(target: jsonb, path: jsonpath, vars: jsonb, silent: bool) -> bool`,
 	2692: `st_3dlength(geometry: geometry) -> float`,
+	2693: `hypo_index_explain(query: string, indexes: string[]) -> string`,
+	2694: `hypo_index_explain(query: string, indexes: string[], options: string) -> string`,
 }
 
 var builtinOidsBySignature map[string]oid.Oid

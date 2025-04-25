@@ -219,6 +219,8 @@ var regularBuiltins = map[string]builtinDefinition{
 	"char_length":      lengthImpls(false /* includeBitOverload */),
 	"character_length": lengthImpls(false /* includeBitOverload */),
 
+	"hypo_index_explain": HypoIndexExplainBuiltin,
+
 	"bit_length": makeBuiltin(tree.FunctionProperties{Category: builtinconstants.CategoryString},
 		stringOverload1(
 			func(_ context.Context, _ *eval.Context, s string) (tree.Datum, error) {
