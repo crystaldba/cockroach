@@ -10,12 +10,15 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -151,7 +154,7 @@ func (p *planner) HypoIndexExplainBuiltin(
 	log.Infof(ctx, "Optimization completed successfully.")
 
 	// Parse EXPLAIN options
-	opts := explain.Flags{Verbose: true}
+	opts := explain.Flags{Verbose: true} // Just set verbose for now
 	// if explainOpts != "" {
 	// 	for _, opt := range strings.Fields(explainOpts) {
 	// 		subOpt := opt
@@ -167,10 +170,13 @@ func (p *planner) HypoIndexExplainBuiltin(
 	// }
 
 	// Format the optimized plan
-	planOutput, err := formatExplainPlan(ctx, p, bld, f.Memo(), opts)
+	log.Infof(ctx, "Formatting explain plan...")
+	planOutput, err := formatExplainPlan(ctx, p, &tempOptimizer, stmts[0].AST, f.Memo(), opts)
 	if err != nil {
+		log.Warningf(ctx, "Error formatting explain plan: %v", err)
 		return "", err
 	}
+	log.Infof(ctx, "Plan formatting complete.")
 
 	// TODO: Here we would create our hypothetical indexes and tables
 	// Similar to how indexrec.BuildOptAndHypTableMaps works
@@ -212,29 +218,80 @@ func (p *planner) HypoIndexExplainBuiltin(
 
 // formatExplainPlan generates a formatted explanation plan for the optimized query
 func formatExplainPlan(
-	ctx context.Context, p *planner, bld *optbuilder.Builder, memo *memo.Memo, opts explain.Flags,
+	ctx context.Context,
+	p *planner,
+	optimizer *xform.Optimizer, // Pass the optimizer used
+	stmtAST tree.Statement,
+	memo *memo.Memo,
+	opts explain.Flags,
 ) (string, error) {
-	// // Get the best plan from the memo
-	// ev := memo.RootExpr()
-	// ob := p.optPlanningCtx.optimizer
+	log.Infof(ctx, "Formatting explain plan...")
+	// 1. Get necessary context
+	semaCtx := &p.semaCtx
+	evalCtx := p.EvalContext()
+	catalog := p.optPlanningCtx.catalog // Use the planner's catalog
+	root := memo.RootExpr()
 
-	// // Generate physical plan
-	// execFactory := bld.Factory()
-	// plan, err := execFactory.ConstructPlan(ctx, ev, false /* distributed */)
-	// if err != nil {
-	// 	return "", err
+	// 2. Create explain factory
+	// Use the standard exec factory for building the explain plan.
+	execFactory := newExecFactory(ctx, p)
+	explainFactory := explain.NewFactory(execFactory, semaCtx, evalCtx)
+	log.Infof(ctx, "Created explain factory.")
+
+	// 3. Create execbuilder
+	allowAutoCommit := false // Hypo explain doesn't involve commits.
+	isANSIDML := statements.IsANSIDML(stmtAST)
+
+	execBld := execbuilder.New(
+		ctx, explainFactory, optimizer, // Use passed optimizer
+		memo, catalog, root,
+		semaCtx, evalCtx, allowAutoCommit, isANSIDML,
+	)
+	execBld.DisableTelemetry() // Disable telemetry for this internal call.
+	log.Infof(ctx, "Created execbuilder.")
+
+	// 4. Build the explain plan
+	log.Infof(ctx, "Building explain plan...")
+	_, err := execBld.Build()
+	if err != nil {
+		log.Warningf(ctx, "Error building explain plan: %v", err)
+		return "", err
+	}
+	// _explainPlan := plan
+	log.Infof(ctx, "Explain plan built successfully.")
+
+	// 5. Format the explain plan rows into a string
+	log.Infof(ctx, "Formatting explain plan rows...")
+	var buf strings.Builder
+	colNames := colinfo.ExplainPlanColumns // Get the standard column names for EXPLAIN output
+	for i, col := range colNames {
+		if i > 0 {
+			buf.WriteString("\t")
+		}
+		buf.WriteString(col.Name)
+	}
+	buf.WriteString("\n")
+
+	// for {
+	// 	row, err := explainPlan.Next(ctx)
+	// 	if err != nil {
+	// 		log.Warningf(ctx, "Error getting next row from explain plan: %v", err)
+	// 		return "", err
+	// 	}
+	// 	if row == nil {
+	// 		log.Infof(ctx, "Finished processing explain plan rows.")
+	// 		break // End of rows
+	// 	}
+	// 	for i, datum := range row {
+	// 		if i > 0 {
+	// 			buf.WriteString("\t")
+	// 		}
+	// 		// Format the datum. We might need more sophisticated formatting later.
+	// 		buf.WriteString(datum.String())
+	// 	}
+	// 	buf.WriteString("\n")
 	// }
 
-	// // Format the explain plan with the provided options
-	// explainPlan := explain.FormatExplainPlan(
-	// 	plan,
-	// 	execFactory,
-	// 	opts,
-	// 	p.ExtendedEvalContext().Descs,
-	// 	p.ExtendedEvalContext().ExecCfg.Codec,
-	// 	p.ExtendedEvalContext().ExecCfg.DistSQLPlanner,
-	// )
-
-	// return explainPlan.String(), nil
-	return "<EXPLAIN PLAN placeholder>", nil
+	log.Infof(ctx, "Formatted explain plan successfully.")
+	return buf.String(), nil
 }
