@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
@@ -150,7 +151,7 @@ func (p *planner) HypoIndexExplainBuiltin(
 	log.Infof(ctx, "Optimization completed successfully.")
 
 	// Parse EXPLAIN options
-	// opts := explain.Flags{Mode: explain.ExplainPlan}
+	opts := explain.Flags{Verbose: true}
 	// if explainOpts != "" {
 	// 	for _, opt := range strings.Fields(explainOpts) {
 	// 		subOpt := opt
@@ -166,11 +167,10 @@ func (p *planner) HypoIndexExplainBuiltin(
 	// }
 
 	// Format the optimized plan
-	planOutput := "<PLACEHOLDER for explain plan>"
-	// planOutput, err := formatExplainPlan(ctx, p, bld, f.Memo(), opts)
-	// if err != nil {
-	// 	return "", err
-	// }
+	planOutput, err := formatExplainPlan(ctx, p, bld, f.Memo(), opts)
+	if err != nil {
+		return "", err
+	}
 
 	// TODO: Here we would create our hypothetical indexes and tables
 	// Similar to how indexrec.BuildOptAndHypTableMaps works
@@ -210,30 +210,31 @@ func (p *planner) HypoIndexExplainBuiltin(
 	return result.String(), memoErr
 }
 
-// // formatExplainPlan generates a formatted explanation plan for the optimized query
-// func formatExplainPlan(
-// 	ctx context.Context, p *planner, bld *optbuilder.Builder, memo *memo.Memo, opts explain.Flags,
-// ) (string, error) {
-// 	// Get the best plan from the memo
-// 	ev := memo.RootExpr()
-// 	ob := p.optPlanningCtx.optimizer
+// formatExplainPlan generates a formatted explanation plan for the optimized query
+func formatExplainPlan(
+	ctx context.Context, p *planner, bld *optbuilder.Builder, memo *memo.Memo, opts explain.Flags,
+) (string, error) {
+	// // Get the best plan from the memo
+	// ev := memo.RootExpr()
+	// ob := p.optPlanningCtx.optimizer
 
-// 	// Generate physical plan
-// 	execFactory := bld.factory
-// 	plan, err := execFactory.ConstructPlan(ctx, ev, false /* distributed */)
-// 	if err != nil {
-// 		return "", err
-// 	}
+	// // Generate physical plan
+	// execFactory := bld.Factory()
+	// plan, err := execFactory.ConstructPlan(ctx, ev, false /* distributed */)
+	// if err != nil {
+	// 	return "", err
+	// }
 
-// 	// Format the explain plan with the provided options
-// 	explainPlan := explain.FormatExplainPlan(
-// 		plan,
-// 		execFactory,
-// 		opts,
-// 		p.ExtendedEvalContext().Descs,
-// 		p.ExtendedEvalContext().ExecCfg.Codec,
-// 		p.ExtendedEvalContext().ExecCfg.DistSQLPlanner,
-// 	)
+	// // Format the explain plan with the provided options
+	// explainPlan := explain.FormatExplainPlan(
+	// 	plan,
+	// 	execFactory,
+	// 	opts,
+	// 	p.ExtendedEvalContext().Descs,
+	// 	p.ExtendedEvalContext().ExecCfg.Codec,
+	// 	p.ExtendedEvalContext().ExecCfg.DistSQLPlanner,
+	// )
 
-// 	return explainPlan.String(), nil
-// }
+	// return explainPlan.String(), nil
+	return "<EXPLAIN PLAN placeholder>", nil
+}
