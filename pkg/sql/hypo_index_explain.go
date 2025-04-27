@@ -58,6 +58,7 @@ func (p *planner) HypoIndexExplainBuiltin(
 
 	// Validate that all statements are CREATE INDEX statements
 	var createIndexStmts []*tree.CreateIndex
+	var tableNames []string
 	for i, stmt := range indexStmts {
 		createIdx, ok := stmt.AST.(*tree.CreateIndex)
 		if !ok {
@@ -66,8 +67,28 @@ func (p *planner) HypoIndexExplainBuiltin(
 				"statement at position %d is not a CREATE INDEX statement", i+1)
 		}
 		createIndexStmts = append(createIndexStmts, createIdx)
+		tableNames = append(tableNames, createIdx.Table.String())
 	}
 	log.Infof(ctx, "All index definitions are valid CREATE INDEX statements.")
+
+	// Check if the tables exist in the database
+	log.Infof(ctx, "Checking if tables exist in the database")
+	for _, tableName := range tableNames {
+		// Try to resolve table name
+		tn := tree.MakeUnqualifiedTableName(tree.Name(tableName))
+		_, err := p.ResolveTableName(ctx, &tn)
+		if err != nil {
+			log.Warningf(ctx, "Table %s does not exist in the database: %v", tableName, err)
+			return fmt.Sprintf("# EXPLAIN with hypothetical indexes\n"+
+				"# Query: %s\n"+
+				"# Hypothetical indexes provided:\n"+
+				"# Warning: Table '%s' not found in the database\n\n"+
+				"# Execution Plan:\n"+
+				"No plan available - some tables in the index definitions do not exist.",
+				query, tableName), nil
+		}
+		log.Infof(ctx, "Table %s exists in the database", tableName)
+	}
 
 	// Parse EXPLAIN options
 	var opts explain.Flags
@@ -110,7 +131,7 @@ func makeQueryPlanWithHypotheticalIndexesOpt(
 	explainOpts explain.Flags,
 ) (string, error) {
 	// Set up the trace for debugging
-	origCtx := ctx
+	// origCtx := ctx
 	ctx, sp := tracing.EnsureChildSpan(ctx, p.execCfg.AmbientCtx.Tracer, "hypo index explain")
 	defer sp.Finish()
 	log.Infof(ctx, "Started tracing in makeQueryPlanWithHypotheticalIndexesOpt")
@@ -220,32 +241,41 @@ func makeQueryPlanWithHypotheticalIndexesOpt(
 		var targetTable cat.Table
 		md := f.Metadata()
 
-		// Search through all tables in the metadata
-		tableFound := false
-		for i := opt.TableID(1); int(i) <= md.NumTables(); i++ {
-			table := md.Table(i)
-			if table == nil {
-				continue
-			}
+		// Log metadata information for debugging
+		tableCount := md.NumTables()
+		log.Infof(ctx, "Current memo has %d tables", tableCount)
 
-			// Try to get table name to compare
+		// Search through all tables in the metadata using a safer approach
+		tableFound := false
+
+		// Now safely check each valid table
+		for _, table_meta := range md.AllTables() {
+			table := table_meta.Table
+			// Get the name of the table using the catalog
 			tn, err := p.optPlanningCtx.catalog.FullyQualifiedName(ctx, table)
 			if err != nil {
-				log.Warningf(ctx, "Error getting fully qualified name for table ID %d: %v", i, err)
-				continue
+				log.Warningf(ctx, "Error getting name for table ID %d: %v", table_meta.MetaID, err)
+				continue // Skip tables we can't name
 			}
 
-			log.Infof(ctx, "Checking table %s against %s", tn.Table(), tableName)
-			if tn.Table() == tableName {
+			// Get the table name as a string for logging
+			tableFQN := tn.String()
+			log.Infof(ctx, "Examining table ID %d: %s", table_meta.MetaID, tableFQN)
+
+			// Get just the table part for comparison (not the schema)
+			tableUnqualifiedName := tn.Table()
+
+			// Compare both fully qualified and unqualified names
+			if tableFQN == tableName || tableUnqualifiedName == tableName {
 				targetTable = table
 				tableFound = true
-				log.Infof(ctx, "Found matching table %s", tn.Table())
+				log.Infof(ctx, "Found matching table %s with ID %d", tableFQN, table_meta.MetaID)
 				break
 			}
 		}
 
 		if !tableFound {
-			log.Warningf(ctx, "Table %s not found in query - skipping index", tableName)
+			log.Warningf(ctx, "Table %s not found in query metadata - skipping index", tableName)
 			continue
 		}
 
@@ -284,23 +314,53 @@ func makeQueryPlanWithHypotheticalIndexesOpt(
 	_, hypTables := indexrec.BuildOptAndHypTableMaps(p.optPlanningCtx.catalog, indexCandidates)
 	log.Infof(ctx, "Built %d hypothetical tables", len(hypTables))
 
+	// Skip the rest if no hypothetical tables were created
+	if len(hypTables) == 0 {
+		log.Warningf(ctx, "No hypothetical tables were created, nothing to explain")
+		// Return an empty plan with a note about the issue
+		return fmt.Sprintf("No valid hypothetical indexes could be created for the query tables.\n" +
+			"Make sure the table(s) in your CREATE INDEX statements are used in the query.\n" +
+			"Table names must match exactly including case and schema qualification."), nil
+	}
+
 	// Re-initialize the optimizer and update the table metadata with hypothetical tables
 	log.Infof(ctx, "Re-initializing optimizer with hypothetical tables")
-	tempOptimizer.Init(origCtx, f.EvalContext(), p.optPlanningCtx.catalog)
+	tempOptimizer.Init(ctx, f.EvalContext(), p.optPlanningCtx.catalog) // Using ctx instead of origCtx
+
+	// Safely copy and replace the memo
+	f = tempOptimizer.Factory()
+	f.FoldingControl().AllowStableFolds()
+
+	// Check if savedMemo or its root expr is nil
+	if savedMemo == nil {
+		log.Warningf(ctx, "Saved memo is nil")
+		return "Error: internal optimization error - saved memo is nil", nil
+	}
+
+	rootExpr := savedMemo.RootExpr()
+	if rootExpr == nil {
+		log.Warningf(ctx, "Saved memo root expression is nil")
+		return "Error: internal optimization error - saved memo root expression is nil", nil
+	}
+
+	// Type assert with safety check
+	relExpr, ok := rootExpr.(memo.RelExpr)
+	if !ok {
+		log.Warningf(ctx, "Root expression is not a RelExpr: %T", rootExpr)
+		return fmt.Sprintf("Error: internal optimization error - unexpected root expression type: %T", rootExpr), nil
+	}
+
+	// Now do the copy and replace
 	f.CopyAndReplace(
 		savedMemo,
-		savedMemo.RootExpr().(memo.RelExpr),
+		relExpr,
 		savedMemo.RootProps(),
 		f.CopyWithoutAssigningPlaceholders,
 	)
 
 	// Update metadata to use hypothetical tables
-	if len(hypTables) > 0 {
-		log.Infof(ctx, "Updating metadata with hypothetical tables")
-		f.Memo().Metadata().UpdateTableMeta(origCtx, f.EvalContext(), hypTables)
-	} else {
-		log.Warningf(ctx, "No hypothetical tables were created")
-	}
+	log.Infof(ctx, "Updating metadata with hypothetical tables")
+	f.Memo().Metadata().UpdateTableMeta(ctx, f.EvalContext(), hypTables) // Using ctx instead of origCtx
 
 	// Optimize the memo with the hypothetical indexes
 	log.Infof(ctx, "Running final optimization with hypothetical indexes")
@@ -312,11 +372,24 @@ func makeQueryPlanWithHypotheticalIndexesOpt(
 
 	// Generate the explain plan
 	log.Infof(ctx, "Generating explain plan")
-	planOutput, err := formatExplainPlan(ctx, p, &tempOptimizer, stmt, f.Memo(), explainOpts)
-	if err != nil {
-		log.Warningf(ctx, "Error formatting explain plan: %v", err)
-		return "", err
-	}
+	var planOutput string
+
+	// Wrap the explain plan generation in a panic handler
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Warningf(ctx, "Panic while generating explain plan: %v", r)
+				planOutput = fmt.Sprintf("Error generating explain plan: %v\n", r)
+			}
+		}()
+
+		var err error
+		planOutput, err = formatExplainPlan(ctx, p, &tempOptimizer, stmt, f.Memo(), explainOpts)
+		if err != nil {
+			log.Warningf(ctx, "Error formatting explain plan: %v", err)
+			planOutput = fmt.Sprintf("Error formatting explain plan: %v\n", err)
+		}
+	}()
 
 	log.Infof(ctx, "Explain plan generated with length: %d", len(planOutput))
 	return planOutput, memoErr
