@@ -412,7 +412,24 @@ func formatExplainPlan(
 		return "Error: memo has no root expression", nil
 	}
 
-	// Extract basic cost info if we can
+	// Extract cost from the root expression if it's been optimized
+	if memo.IsOptimized() {
+		// The memo is optimized when memo.rootExpr is a RelExpr with physical properties assigned
+		// When that's the case, we can get the cost directly from memo.RootExpr()
+		// Create a formatted string for the cost
+
+		// Find a cleaner way to print the cost
+		ok, costEstimate := memo.GetCost()
+		if ok {
+			buf.WriteString(fmt.Sprintf("Optimizer Cost: %f\n\n", costEstimate.C))
+		} else {
+			buf.WriteString("Optimizer Cost: Available, but not possible to extract\n\n")
+		}
+	} else {
+		buf.WriteString("Optimizer Cost: Not available (plan not fully optimized)\n\n")
+	}
+
+	// Extract basic info about the plan
 	buf.WriteString(fmt.Sprintf("Plan Type: %T\n", root))
 
 	// Create a simple text output with the available information
@@ -424,6 +441,9 @@ func formatExplainPlan(
 	// Add table information
 	tableCount := md.NumTables()
 	buf.WriteString(fmt.Sprintf("Tables in query: %d\n\n", tableCount))
+
+	// Track which indexes might be used for each table
+	usedIndexes := make(map[string][]string)
 
 	// Go through each table
 	for _, table_meta := range md.AllTables() {
@@ -446,6 +466,7 @@ func formatExplainPlan(
 		buf.WriteString(fmt.Sprintf("Table: %s, Indexes: %d\n", tableName, indexCount))
 
 		// Output the first few indexes
+		tableIndexes := make([]string, 0, indexCount)
 		for idx := 0; idx < indexCount && idx < 10; idx++ {
 			index := table.Index(idx)
 			indexName := index.Name()
@@ -465,24 +486,43 @@ func formatExplainPlan(
 
 			buf.WriteString(fmt.Sprintf("  Index %d: %s%s (", idx, indexName, indexType))
 
+			// Build a string showing index columns
+			var indexInfo strings.Builder
+			indexInfo.WriteString(fmt.Sprintf("%s%s", indexName, indexType))
+			indexInfo.WriteString(" (")
+
 			// Output index columns
 			for col := 0; col < colCount && col < 5; col++ {
 				if col > 0 {
 					buf.WriteString(", ")
+					indexInfo.WriteString(", ")
 				}
 				indexCol := index.Column(col)
 				colName := string(indexCol.Column.ColName())
 				buf.WriteString(colName)
+				indexInfo.WriteString(colName)
 			}
 
 			// If we didn't show all columns, indicate that
 			if colCount > 5 {
 				buf.WriteString(", ...")
+				indexInfo.WriteString(", ...")
 			}
 
 			buf.WriteString(")\n")
+			indexInfo.WriteString(")")
+
+			// Store the index for this table
+			if indexType != "" {
+				tableIndexes = append(tableIndexes, indexInfo.String())
+			}
 		}
 		buf.WriteString("\n")
+
+		// Store the indexes for this table
+		if len(tableIndexes) > 0 {
+			usedIndexes[tableName] = tableIndexes
+		}
 	}
 
 	// Use memo's String method to get a simple representation of the optimizer's plan
