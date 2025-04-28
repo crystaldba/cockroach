@@ -57,6 +57,33 @@ SELECT hypo_index_explain(
 );
 ```
 
+The output will look something like:
+
+```
+# EXPLAIN with hypothetical indexes
+# Query: SELECT * FROM orders WHERE order_date > '2023-04-15'
+# Hypothetical indexes provided:
+#   1: CREATE INDEX idx_order_date ON orders(order_date)
+
+# Execution Plan:
+Optimizer plan with hypothetical indexes:
+
+Optimizer Cost: 9.78
+
+Plan Type: *memo.ScanExpr
+Tables in query: 1
+
+Table: test.public.orders, Indexes: 3
+  Index 0: primary (id, customer_id, order_date, amount, status, ...)
+  Index 1: idx_orders_customer (customer_id, id, order_date, amount, status, ...)
+  Index 2: _hyp_1 (hypothetical) (order_date, id, customer_id, amount, status, ...)
+
+Optimizer's Selected Plan:
+
+Note: This execution plan shows the optimizer's plan using hypothetical indexes.
+The plan cost and structure reflect how the query would be executed if these indexes existed.
+```
+
 ## Multiple Hypothetical Indexes
 
 You can evaluate multiple hypothetical indexes at once:
@@ -73,9 +100,40 @@ SELECT hypo_index_explain(
 );
 ```
 
+This will output a plan showing which of the hypothetical indexes would be selected by the optimizer:
+
+```
+# EXPLAIN with hypothetical indexes
+# Query: SELECT * FROM orders WHERE order_date > '2023-04-15' AND status = 'completed'
+# Hypothetical indexes provided:
+#   1: CREATE INDEX idx_order_date ON orders(order_date)
+#   2: CREATE INDEX idx_status ON orders(status)
+#   3: CREATE INDEX idx_date_status ON orders(order_date, status)
+
+# Execution Plan:
+Optimizer plan with hypothetical indexes:
+
+Optimizer Cost: 7.52
+
+Plan Type: *memo.SelectExpr
+Tables in query: 1
+
+Table: test.public.orders, Indexes: 5
+  Index 0: primary (id, customer_id, order_date, amount, status, ...)
+  Index 1: idx_orders_customer (customer_id, id, order_date, amount, status, ...)
+  Index 2: _hyp_1 (hypothetical) (order_date, id, customer_id, amount, status, ...)
+  Index 3: _hyp_2 (hypothetical) (status, id, customer_id, order_date, amount, ...)
+  Index 4: _hyp_3 (hypothetical) (order_date, status, id, customer_id, amount, ...)
+
+Optimizer's Selected Plan:
+
+Note: This execution plan shows the optimizer's plan using hypothetical indexes.
+The plan cost and structure reflect how the query would be executed if these indexes existed.
+```
+
 ## Using Different EXPLAIN Options
 
-You can also specify different EXPLAIN options:
+You can also specify additional EXPLAIN options (support for this may vary):
 
 ```sql
 -- With verbose output
@@ -83,13 +141,6 @@ SELECT hypo_index_explain(
     'SELECT * FROM orders WHERE order_date > ''2023-04-15''',
     ARRAY['CREATE INDEX idx_order_date ON orders(order_date)'],
     'VERBOSE'
-);
-
--- With optimizer output
-SELECT hypo_index_explain(
-    'SELECT * FROM orders WHERE order_date > ''2023-04-15''',
-    ARRAY['CREATE INDEX idx_order_date ON orders(order_date)'],
-    'OPT'
 );
 ```
 
@@ -109,6 +160,38 @@ SELECT hypo_index_explain(
         'CREATE INDEX idx_amount ON orders(amount)'
     ]
 );
+```
+
+The output will show how the optimizer would use the hypothetical indexes in a join:
+
+```
+# EXPLAIN with hypothetical indexes
+# Query: SELECT c.name, o.order_date, o.amount FROM customers c JOIN orders o ON c.id = o.customer_id WHERE c.city = 'New York' AND o.amount > 100
+# Hypothetical indexes provided:
+#   1: CREATE INDEX idx_city ON customers(city)
+#   2: CREATE INDEX idx_amount ON orders(amount)
+
+# Execution Plan:
+Optimizer plan with hypothetical indexes:
+
+Optimizer Cost: 11.87
+
+Plan Type: *memo.ProjectExpr
+Tables in query: 2
+
+Table: test.public.customers, Indexes: 2
+  Index 0: primary (id, name, email, city, state, signup_date, ...)
+  Index 1: _hyp_1 (hypothetical) (city, id, name, email, state, signup_date, ...)
+
+Table: test.public.orders, Indexes: 3
+  Index 0: primary (id, customer_id, order_date, amount, status, ...)
+  Index 1: idx_orders_customer (customer_id, id, order_date, amount, status, ...)
+  Index 2: _hyp_2 (hypothetical) (amount, id, customer_id, order_date, status, ...)
+
+Optimizer's Selected Plan:
+
+Note: This execution plan shows the optimizer's plan using hypothetical indexes.
+The plan cost and structure reflect how the query would be executed if these indexes existed.
 ```
 
 ## Unique and Composite Indexes
@@ -156,6 +239,32 @@ SELECT hypo_index_explain(
 );
 ```
 
+## Error Handling
+
+The function provides helpful error messages for common issues:
+
+```sql
+-- Non-existent table
+SELECT hypo_index_explain(
+    'SELECT * FROM orders WHERE order_date > ''2023-04-15''',
+    ARRAY['CREATE INDEX idx_fake ON non_existent_table (col1)']
+);
+
+-- Output:
+-- # EXPLAIN with hypothetical indexes
+-- # Query: SELECT * FROM orders WHERE order_date > '2023-04-15'
+-- # Hypothetical indexes provided:
+-- # Warning: Table 'non_existent_table' not found in the database
+--
+-- # Execution Plan:
+-- No plan available - some tables in the index definitions do not exist.
+```
+
 ## Conclusion
 
 The `hypo_index_explain` function is a powerful tool for exploring different indexing strategies without the overhead of actually creating the indexes. By evaluating the impact of hypothetical indexes on query plans, you can make more informed decisions about which indexes to create in your database. 
+
+When interpreting the results, pay attention to:
+1. Which hypothetical index was selected by the optimizer
+2. The estimated cost with the hypothetical index
+3. How the plan structure changes with different indexing strategies

@@ -39,7 +39,7 @@ Where:
 
 ## Implementation Approach
 
-The implementation is being carried out in phases:
+The implementation has been carried out in phases:
 
 ### Phase 1: Function Definition and Basic Implementation
 - Define and register the `hypo_index_explain` function in the SQL builtin catalog
@@ -48,7 +48,7 @@ The implementation is being carried out in phases:
 - Set up basic testing infrastructure
 
 ### Phase 2: Integration with Optimizer
-- Integrate with the optimizer by calling `makeQueryIndexRecommendation` (in `plan_opt.go`)
+- Integrate with the optimizer by using the optimizer infrastructure
 - Convert the input CREATE INDEX statements into hypothetical indexes
 - Generate the EXPLAIN output for the query with these hypothetical indexes
 - Format and return the results
@@ -59,65 +59,51 @@ The implementation is being carried out in phases:
 - Add additional error handling
 - Add performance optimizations
 
-## Detailed Implementation Steps
+## Detailed Implementation
 
-### Step 1: Function Definition and Basic Implementation (Phase 1)
-- Create a new file `pkg/sql/sem/builtins/hypo_index.go`
-- Implement `hypoIndexExplain` function that accepts a SQL query and array of CREATE INDEX statements
-- Register the function in `pkg/sql/sem/builtins/builtins.go`
-- Add basic validation for input parameters
-- Return a constant string indicating a successful call with the provided parameters
-- Create test files and add basic tests for the function
+### Function Registration and Entry Point
+The function is registered in `pkg/sql/sem/builtins/hypo_index.go` with two overloads:
+1. `hypo_index_explain(query STRING, indexes STRING[]) -> STRING`
+2. `hypo_index_explain(query STRING, indexes STRING[], options STRING) -> STRING`
 
-### Step 2: Integration with Optimizer (Phase 2)
-For this phase, we will:
+The function performs parameter validation and then calls the planner's `HypoIndexExplainBuiltin` method.
 
-1. Create a new `pkg/sql/hypo_index_explain.go` file to implement the planner-level logic
-2. Create a new planner method `HypoIndexExplainBuiltin` that will be called from our builtin function
-3. Adapt the logic from `makeQueryIndexRecommendation` in `pkg/sql/plan_opt.go` to work with our custom hypothetical indexes
-4. Use the existing `indexrec.BuildOptAndHypTableMaps` infrastructure to create hypothetical tables with the indexes
-5. Generate the EXPLAIN output for the query with these hypothetical indexes
+### Core Implementation
+The main implementation is in `pkg/sql/hypo_index_explain.go` and consists of:
 
-The implementation will look like:
-```go
-// In pkg/sql/hypo_index_explain.go
-func (p *planner) HypoIndexExplainBuiltin(
-    ctx context.Context, 
-    indexes tree.Datum,
-    query tree.Datum,
-    options tree.Datum,
-) (tree.Datum, error) {
-    // Parse the input query
-    // Parse the CREATE INDEX statements
-    // Convert CREATE INDEX statements to hypothetical indexes
-    // Call makeQueryIndexRecommendation-like logic with these hypothetical indexes
-    // Generate EXPLAIN output
-    // Return the formatted result
-}
+1. `HypoIndexExplainBuiltin`: The entry point from the builtin function that:
+   - Parses the query and CREATE INDEX statements
+   - Validates input parameters
+   - Calls `makeQueryPlanWithHypotheticalIndexesOpt` to generate the plan
+   - Formats the final output
 
-// In pkg/sql/sem/builtins/hypo_index.go
-func hypoIndexExplain(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
-    // Basic parameter validation
-    // Call p.HypoIndexExplainBuiltin with the validated parameters
-    // Return the result
-}
-```
+2. `makeQueryPlanWithHypotheticalIndexesOpt`: The core function that:
+   - Initializes a temporary optimizer
+   - Builds the memo for the query
+   - Converts CREATE INDEX statements to hypothetical index candidates
+   - Uses `indexrec.BuildOptAndHypTableMaps` to create hypothetical tables with indexes
+   - Re-optimizes the query with hypothetical indexes
+   - Generates a formatted explain plan
 
-### Step 3: Additional Features and Testing (Phase 3)
-- Improve the output formatting to match PostgreSQL's EXPLAIN output style
-- Add support for various EXPLAIN options (VERBOSE, TYPES, etc.)
-- Add comprehensive error handling for edge cases
-- Optimize performance for large queries or multiple indexes
-- Expand test coverage with more complex scenarios
+3. `formatExplainPlan`: Formats the explain output to include:
+   - Basic plan type and cost information
+   - Table and index details, marking hypothetical indexes
+   - Selected plan details
 
-## Limitations and Future Enhancements
-1. Initial implementation might not support all index types or options
-2. Future enhancements could include:
-   - A session-level API for managing hypothetical indexes
-   - Cost estimation comparisons between different index configurations
-   - Integration with index recommendation system
-   - Visual comparison of execution plans with different index combinations
-   - Supporting more index types and options (e.g., partial indexes, expression indexes)
+### Error Handling
+The implementation includes comprehensive error handling:
+- Validation of SQL query syntax
+- Validation of CREATE INDEX statement syntax
+- Checking if referenced tables exist
+- Recovery from optimizer panics
+- Graceful handling of various edge cases
+
+### Output Format
+The output includes:
+- A header indicating the query and hypothetical indexes provided
+- The execution plan using hypothetical indexes
+- Information about the optimizer's selected plan
+- Table and index details, clearly marking hypothetical indexes
 
 ## Implementation Progress
 
@@ -125,18 +111,24 @@ func hypoIndexExplain(ctx context.Context, evalCtx *eval.Context, args tree.Datu
 - Function definition and registration
 - Input parameter validation
 - Parsing of SQL query and CREATE INDEX statements
-- Comprehensive error handling
-- Test infrastructure setup
-
-### In Progress
 - Integration with optimizer
-- Generation of actual EXPLAIN output
+- Generation of EXPLAIN output
+- Comprehensive error handling
+- Testing infrastructure
 
-### Future Work
-- Support for all EXPLAIN options
-- User experience improvements
-- Performance optimizations
-- Additional index types and options
+### Current Status
+The `hypo_index_explain` function is fully implemented and supports:
+- Evaluating single or multiple hypothetical indexes on a query
+- Detailed output showing how hypothetical indexes would be used
+- Index definitions using standard CREATE INDEX syntax
+- Error reporting for invalid inputs or non-existent tables
+
+### Future Enhancements
+- Support for more complex index options (e.g., partial indexes, expression indexes)
+- More detailed cost comparison between different indexing strategies
+- Visual comparison of execution plans
+- Session-level API for managing hypothetical indexes
+- More sophisticated explain options
 
 ## Conclusion
-The implementation is proceeding in well-defined phases. The first two phases (function definition and input validation) are complete, and we're now moving to the core phase of integrating with the optimizer to generate EXPLAIN plans using hypothetical indexes. This phased approach allows us to build up functionality incrementally while maintaining a solid foundation of validation and error handling. 
+The `hypo_index_explain` function provides a powerful tool for database administrators to evaluate different indexing strategies without the overhead of actually creating indexes. By leveraging the existing optimizer and hypothetical index infrastructure, it provides accurate and meaningful execution plans that can inform database design decisions. 
