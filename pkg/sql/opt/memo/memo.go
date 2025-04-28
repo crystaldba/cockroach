@@ -550,6 +550,17 @@ func (m *Memo) IsOptimized() bool {
 	return ok && rel.RequiredPhysical() != nil
 }
 
+// GetCost returns the cost of the root expression if the memo has been fully optimized.
+func (m *Memo) GetCost() (bool, Cost) {
+	// The memo is optimized once the root expression has its physical properties
+	// assigned.
+	rel, ok := m.rootExpr.(RelExpr)
+	if !ok {
+		return false, Cost{C: -1}
+	}
+	return true, rel.Cost()
+}
+
 // OptimizationCost returns a rough estimate of the cost of optimization of the
 // memo. It is dependent on the number of tables in the metadata, based on the
 // reasoning that queries with more tables likely have more joins, which tend

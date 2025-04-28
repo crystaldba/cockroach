@@ -1,0 +1,74 @@
+# Basic test for hypo_index_explain function
+
+statement ok
+CREATE TABLE test (
+    id INT PRIMARY KEY,
+    a INT,
+    b STRING,
+    c FLOAT,
+    d BOOL
+)
+
+# Simple test with one index
+query T
+SELECT hypo_index_explain(
+    'SELECT * FROM test WHERE a > 10',
+    ARRAY['CREATE INDEX idx_a ON test(a)']
+)
+----
+Hypothetical EXPLAIN plan (Phase 1 - constant string):
+Query: SELECT * FROM test WHERE a > 10
+Hypothetical Indexes:
+  1: CREATE INDEX idx_a ON test(a)
+
+Full implementation coming soon. This is a placeholder in Phase 1.
+
+# Test with multiple indexes
+query T
+SELECT hypo_index_explain(
+    'SELECT * FROM test WHERE a > 10 AND b = ''test''',
+    ARRAY['CREATE INDEX idx_a ON test(a)', 'CREATE INDEX idx_b ON test(b)']
+)
+----
+Hypothetical EXPLAIN plan (Phase 1 - constant string):
+Query: SELECT * FROM test WHERE a > 10 AND b = 'test'
+Hypothetical Indexes:
+  1: CREATE INDEX idx_a ON test(a)
+  2: CREATE INDEX idx_b ON test(b)
+
+Full implementation coming soon. This is a placeholder in Phase 1.
+
+# Test with EXPLAIN options
+query T
+SELECT hypo_index_explain(
+    'SELECT * FROM test WHERE a > 10',
+    ARRAY['CREATE INDEX idx_a ON test(a)'],
+    'VERBOSE'
+)
+----
+Hypothetical EXPLAIN plan (Phase 1 - constant string):
+Query: SELECT * FROM test WHERE a > 10
+Hypothetical Indexes:
+  1: CREATE INDEX idx_a ON test(a)
+EXPLAIN Options: VERBOSE
+
+Full implementation coming soon. This is a placeholder in Phase 1.
+
+# Test error cases
+statement error
+SELECT hypo_index_explain(
+    '',
+    ARRAY['CREATE INDEX idx_a ON test(a)']
+)
+
+statement error
+SELECT hypo_index_explain(
+    'SELECT * FROM test WHERE a > 10',
+    ARRAY[]
+)
+
+statement error
+SELECT hypo_index_explain(
+    'SELECT * FROM test WHERE a > 10',
+    ARRAY['']
+) 
